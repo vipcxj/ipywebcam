@@ -9,8 +9,6 @@ import {
 
 import { MODULE_NAME, MODULE_VERSION } from './version';
 
-import { createPeerConnection, negotiate } from './webrtc';
-
 // Import the CSS
 import '../css/widget.css';
 

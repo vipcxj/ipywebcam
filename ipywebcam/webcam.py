@@ -14,7 +14,8 @@ import logging
 from aiortc import MediaStreamTrack, RTCPeerConnection, RTCSessionDescription
 from aiortc.contrib.media import MediaBlackhole, MediaRelay
 from ipywidgets import DOMWidget
-from traitlets import Unicode, Dict, Enum
+from traitlets import Unicode, Dict, Enum, observe
+from typing_extensions import TypeAlias
 from ._frontend import module_name, module_version
 
 logger = logging.getLogger("ipywebcam")
@@ -29,7 +30,9 @@ def on_exit():
 
 logger.info("I am loaded")
 
-pcs: set[RTCPeerConnection] = set()
+PcSet: TypeAlias = "set[RTCPeerConnection]"
+
+pcs: PcSet = set()
 relay = MediaRelay()
 
 
@@ -67,5 +70,7 @@ class WebCamWidget(DOMWidget):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         
-        
-
+    
+    @observe("client_desc")
+    def on_client_desc_change(self, change):
+        pass
