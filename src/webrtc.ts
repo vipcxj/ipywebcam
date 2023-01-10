@@ -1,7 +1,5 @@
 /* eslint-disable @typescript-eslint/no-non-null-assertion */
-export function createPeerConnection(
-  video: HTMLVideoElement
-): RTCPeerConnection {
+export function createPeerConnection(): RTCPeerConnection {
   const config = {
     sdpSemantics: 'unified-plan',
     iceServers: [{ urls: ['stun:stun.l.google.com:19302'] }],
@@ -33,13 +31,6 @@ export function createPeerConnection(
     },
     false
   );
-
-  // connect audio / video
-  pc.addEventListener('track', (evt) => {
-    if (evt.track.kind === 'video') {
-      video.srcObject = evt.streams[0];
-    }
-  });
 
   return pc;
 }

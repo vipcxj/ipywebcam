@@ -8,43 +8,34 @@
 TODO: Add module docstring
 """
 
-import atexit
+from os import path
 import asyncio
 import logging
-from aiortc import MediaStreamTrack, RTCPeerConnection, RTCSessionDescription
-from aiortc.contrib.media import MediaBlackhole, MediaRelay
-from ipywidgets import DOMWidget
-from traitlets import Unicode, Dict, Enum, observe
-from typing_extensions import TypeAlias
+from aiortc import RTCPeerConnection, RTCSessionDescription
+from aiortc.contrib.media import MediaRelay
+from ipywidgets import DOMWidget, Dropdown
+from traitlets import List, Unicode, Dict, Enum, observe, link
 from ._frontend import module_name, module_version
 
 logger = logging.getLogger("ipywebcam")
 logger.setLevel(logging.DEBUG)
-fh = logging.FileHandler("C:\\Users\\vipcx\\Projects\\ipywebcam\\ipywebcam.log")
+fh = logging.FileHandler(path.join(path.dirname(__file__), "ipywebcam.log"))
 fh.setLevel(logging.DEBUG)
 logger.addHandler(fh)
-loop = asyncio.get_event_loop()
+my_loop = False
+try:
+    loop = asyncio.get_running_loop()
+    logger.debug("using exist loop.")
+except RuntimeError:
+    loop = asyncio.get_event_loop()
+    my_loop = True
+    logger.debug("create new loop.")
 
-@atexit.register
-def on_exit():
-    logger.info("I am unloaded")
-    asyncio.wait(on_shutdown)
-    loop.close()
 
 logger.info("I am loaded")
 
-PcSet: TypeAlias = "set[RTCPeerConnection]"
 
-pcs: PcSet = set()
 relay = MediaRelay()
-
-
-async def on_shutdown():
-    # close peer connections
-    coros = [pc.close() for pc in pcs]
-    await asyncio.gather(*coros)
-    pcs.clear()
-
 
 class WebCamWidget(DOMWidget):
     """TODO: Add docstring here
@@ -70,56 +61,103 @@ class WebCamWidget(DOMWidget):
         allow_none=True
     ).tag(sync=True)
     
+    devices = List(Dict(), default_value=[]).tag(sync=True)
+    
+    device = Dict(default_value=None, allow_none=True).tag(sync=True)
+    
+    devicesWidget = Dropdown(options=[], value=None, description='cameras')
+    
     pc: RTCPeerConnection = None
     state: int = 0
     
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
+        def transform_devices_to_options(devices): 
+            options = [(device['label'] or device['deviceId'], device) for device in devices]
+            options.insert(0, None)
+            return options
+        def transform_options_to_devices(options):
+            return [device for (_, device) in options if device]
+        def transform_device_to_option(device):
+            if device:
+                return (device['label'] or device['deviceId'], device)
+            else:
+                return None
+        def transform_option_to_device(option):
+            if option:
+                (_, device) = option
+                return device
+            else:
+                return None
+        link((self.devicesWidget, "options"), (self, "devices"), transform=(transform_options_to_devices, transform_devices_to_options))
+        link((self.devicesWidget, "value"), (self, "device"), transform=(transform_option_to_device, transform_device_to_option))
         
     
     async def new_pc_connection(self, client_desc: dict[str, str]):
+        logger.debug("new_pc_connection")
         if self.state >= 0:
             try:
                 self.state = -1
-                await self.close_pc_connection()
+                await self.close_pc_connection(self.pc)
                 offer = RTCSessionDescription(**client_desc)
-                self.pc = RTCPeerConnection()
-                pcs.add(self.pc)
+                self.pc = pc = RTCPeerConnection()
                 
-                @self.pc.on("connectionstatechange")    
+                @pc.on("connectionstatechange")    
                 async def on_connectionstatechange():
-                    logger.info("Connection state is %s", self.pc.connectionState)
-                    if self.pc.connectionState == "failed":
-                        await self.close_pc_connection()
+                    logger.info("Connection state is %s", pc.connectionState)
+                    if pc.connectionState == "failed":
+                        await self.close_pc_connection(pc)
                         self.state = 2
                                 
-                @self.pc.on("track")
+                @pc.on("track")
                 def on_track(track):
                     logger.info("Track %s received", track.kind)
                     if track.kind == "video":
-                        self.pc.addTrack(relay.subscribe(track))
+                        pc.addTrack(relay.subscribe(track))
                         
                 # handle offer
-                await self.pc.setRemoteDescription(offer)
+                await pc.setRemoteDescription(offer)
                 # send answer
-                answer = await self.pc.createAnswer()
-                await self.pc.setLocalDescription(answer)
+                answer = await pc.createAnswer()
+                await pc.setLocalDescription(answer)
                 logger.debug(f"send answer: {answer} to client.")
-                self.server_desc = answer
+                self.server_desc = { "sdp": answer.sdp, "type": answer.type }
                 self.state = 1
             except Exception as e:
-                logger.error(e)
+                logger.exception(e)
                 self.state = 2
     
     
-    async def close_pc_connection(self):
-        if self.pc:
-            await self.pc.close()
-            pcs.remove(self.pc)
-            self.pc = None
+    async def close_pc_connection(self, pc: RTCPeerConnection):
+        if pc:
+            logger.debug("closing pc")
+            await pc.close()
+            logger.debug("closed pc")
+            if self.pc == pc:
+                self.pc = None
         
     
     @observe("client_desc")
     def on_client_desc_change(self, change):
-        logger.debug(f'receive client_desc change from {change.old} to {change.new}')
-        loop.call_soon(self.new_pc_connection, change.new)
+        try:
+            logger.debug(f'receive client_desc change from {change.old} to {change.new}')
+            logger.debug(f'loop is running? {loop.is_running()}')
+            loop.create_task(self.new_pc_connection(change.new))
+            logger.debug("on_client_desc_change end")
+        except Exception as e:
+            logger.error(e)
+            
+    def __del__(self):
+        loop.create_task(self.close_pc_connection(self.pc))
+        return super().__del__()
+            
+    
+"""     @observe("devices")    
+    def on_devices_change(self, change):
+        try:
+            logger.debug(change.new)
+            self.devicesWidget.options = [(device['label'] or device['deviceId'], device['deviceId']) for device in change.new]
+            self.devicesWidget.value = None
+        except Exception as e:
+            logger.exception(e) """
+                  
