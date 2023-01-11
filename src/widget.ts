@@ -6,13 +6,19 @@ import {
   DOMWidgetView,
   ISerializers,
 } from '@jupyter-widgets/base';
-import * as Backbone from 'backbone';
+import Backbone from 'backbone';
 
-import { createPeerConnection, negotiate } from './webrtc';
+import {
+  createPeerConnection,
+  negotiate,
+  waitForConnectionState,
+} from './webrtc';
 import { MODULE_NAME, MODULE_VERSION } from './version';
 
 // Import the CSS
 import '../css/widget.css';
+
+type State = 'closing' | 'connecting' | 'connected' | 'closed' | 'error';
 
 export class WebCamModel extends DOMWidgetModel {
   defaults(): Backbone.ObjectHash {
@@ -26,8 +32,17 @@ export class WebCamModel extends DOMWidgetModel {
       _view_module_version: WebCamModel.view_module_version,
       server_desc: null,
       client_desc: null,
+      iceServers: [],
       devices: [],
       device: null,
+      state: 'closed',
+      autoplay: true,
+      controls: true,
+      crossOrigin: 'not-support',
+      width: null,
+      height: null,
+      playsInline: true,
+      muted: false,
     };
   }
 
@@ -35,6 +50,12 @@ export class WebCamModel extends DOMWidgetModel {
   constructor(...args: any[]) {
     super(...args);
     this.fetchDevices();
+    this.on('change:device', () => {
+      this.connect(undefined, true);
+    });
+    this.on('change:iceServers', () => {
+      this.connect(undefined, true);
+    });
   }
 
   static serializers: ISerializers = {
@@ -53,28 +74,65 @@ export class WebCamModel extends DOMWidgetModel {
   client_stream: MediaStream | undefined;
   server_stream: MediaStream | undefined;
 
-  reset_pc = (): void => {
+  resetPeer = (): void => {
     this.pc = undefined;
     this.client_stream = undefined;
     this.server_stream = undefined;
   };
 
-  close = async (): Promise<void> => {
+  waitForStateWhen = async (
+    checker: (state: State) => boolean
+  ): Promise<State> => {
+    return new Promise<State>((resolve) => {
+      const state: State = this.get('state');
+      if (checker(state)) {
+        resolve(state);
+      } else {
+        const checkState = () => {
+          const state: State = this.get('state');
+          if (checker(state)) {
+            this.off('change:state', checkState);
+            resolve(state);
+          }
+        };
+        this.on('change:state', checkState);
+      }
+    });
+  };
+
+  waitForStateIn = async (...states: State[]): Promise<State> => {
+    return this.waitForStateWhen((state) => states.indexOf(state) !== -1);
+  };
+
+  getState = (): State => this.get('state');
+
+  setState = (state: State): void => {
+    this.set('state', state);
+  };
+
+  closePeer = async (): Promise<void> => {
+    const state = await this.waitForStateIn('closed', 'connected', 'error');
     const pc = this.pc;
-    if (!pc) {
+    if (!pc || state === 'closed' || state === 'error') {
       return;
     }
-    pc.close();
-    if (pc.connectionState !== 'closed') {
-      await new Promise<void>((resolve) => {
-        pc.addEventListener('connectionstatechange', () => {
-          if (pc.connectionState === 'closed') {
-            resolve();
-          }
+    this.setState('closing');
+    try {
+      this.resetPeer();
+      pc.close();
+      if (pc.connectionState !== 'closed') {
+        await new Promise<void>((resolve) => {
+          pc.addEventListener('connectionstatechange', () => {
+            if (pc.connectionState === 'closed') {
+              resolve();
+            }
+          });
         });
-      });
+      }
+      this.setState('closed');
+    } catch (err) {
+      this.setState('error');
     }
-    this.reset_pc();
   };
 
   fetchDevices = async (): Promise<void> => {
@@ -86,13 +144,30 @@ export class WebCamModel extends DOMWidgetModel {
     this.save_changes();
   };
 
+  getPeerConfig = (): RTCConfiguration => {
+    const config: RTCConfiguration = {};
+    const iceServers: any[] = this.get('iceServers');
+    if (iceServers && iceServers.length > 0) {
+      config.iceServers = iceServers.map((server) => {
+        if (typeof server === 'string') {
+          return { urls: server };
+        } else {
+          return server as RTCIceServer;
+        }
+      });
+    }
+    return config;
+  };
+
   connect = async (
-    video: HTMLVideoElement,
+    video: HTMLVideoElement | undefined,
     force_new_pc = false
   ): Promise<void> => {
-    if (!this.pc) {
+    const state = await this.waitForStateIn('closed', 'connected', 'error');
+    if (state === 'closed' || state === 'error') {
       try {
-        const pc = createPeerConnection();
+        this.setState('connecting');
+        const pc = createPeerConnection(this.getPeerConfig());
         this.pc = pc;
         this.bindVideo(video);
         pc.addEventListener('connectionstatechange', () => {
@@ -104,13 +179,20 @@ export class WebCamModel extends DOMWidgetModel {
           ) {
             pc.close();
             if (this.pc === pc) {
-              this.reset_pc();
+              this.resetPeer();
             }
           }
         });
+        pc.addEventListener('track', (evt) => {
+          if (evt.track.kind === 'video') {
+            console.log('track gotten');
+            this.server_stream = evt.streams[0];
+          }
+        });
+        const device = this.get('device');
         const constraints = {
           audio: false,
-          video: true,
+          video: device ? { deviceId: device.deviceId } : true,
         };
         const stream = await navigator.mediaDevices.getUserMedia(constraints);
         this.client_stream = stream;
@@ -127,31 +209,44 @@ export class WebCamModel extends DOMWidgetModel {
             });
           });
         });
+        const pcState = await waitForConnectionState(
+          pc,
+          (state) => state !== 'connecting'
+        );
+        if (pcState === 'connected') {
+          this.setState('connected');
+        } else {
+          await this.closePeer();
+        }
       } catch (err) {
+        this.setState('error');
         console.error(err);
       }
     } else if (force_new_pc) {
-      await this.close();
+      await this.closePeer();
       await this.connect(video, force_new_pc);
     } else {
       this.bindVideo(video);
     }
   };
 
-  bindVideo = (video: HTMLVideoElement): void => {
-    if (!this.pc) {
+  bindVideo = (video: HTMLVideoElement | undefined): void => {
+    const pc = this.pc;
+    if (!pc || !video) {
       return;
     }
-    if (this.pc.connectionState === 'connected' && this.server_stream) {
+    if (pc.connectionState === 'connected' && this.server_stream) {
       video.srcObject = this.server_stream;
     } else {
-      this.pc.addEventListener('track', (evt) => {
+      const handler = (evt: RTCTrackEvent): any => {
         if (evt.track.kind === 'video') {
           console.log('track gotten');
           this.server_stream = evt.streams[0];
           video.srcObject = this.server_stream;
+          pc.removeEventListener('track', handler);
         }
-      });
+      };
+      pc.addEventListener('track', handler);
     }
   };
 }
@@ -161,9 +256,64 @@ export class WebCamView extends DOMWidgetView {
 
   render(): any {
     const video = document.createElement('video');
-    video.autoplay = true;
     video.playsInline = true;
     this.el.appendChild(video);
     (this.model as WebCamModel).connect(video);
+    this.model.on('change:state', () => {
+      const model = this.model as WebCamModel;
+      if (model.getState() === 'connected') {
+        model.connect(video);
+      }
+    });
+    video.autoplay = this.model.get('autoplay');
+    this.model.on('change:autoplay', () => {
+      video.autoplay = this.model.get('autoplay');
+    });
+    video.controls = this.model.get('controls');
+    this.model.on('change:controls', () => {
+      video.controls = this.model.get('controls');
+    });
+    const width = this.model.get('width');
+    if (width) {
+      video.width = width;
+    }
+    this.model.on('change:width', () => {
+      const width = this.model.get('width');
+      if (width) {
+        video.width = width;
+      }
+    });
+    const height = this.model.get('height');
+    if (height) {
+      video.height = height;
+    }
+    this.model.on('change:height', () => {
+      const height = this.model.get('height');
+      if (height) {
+        video.height = height;
+      }
+    });
+    video.playsInline = this.model.get('playsInline');
+    this.model.on('change:playsInline', () => {
+      video.playsInline = this.model.get('playsInline');
+    });
+    video.muted = this.model.get('muted');
+    this.model.on('change:muted', () => {
+      video.muted = this.model.get('muted');
+    });
+    const crossOrigin = this.model.get('crossOrigin');
+    if (crossOrigin === 'not-support') {
+      video.crossOrigin = null;
+    } else {
+      video.crossOrigin = crossOrigin;
+    }
+    this.model.on('change:crossOrigin', () => {
+      const crossOrigin = this.model.get('crossOrigin');
+      if (crossOrigin === 'not-support') {
+        video.crossOrigin = null;
+      } else {
+        video.crossOrigin = crossOrigin;
+      }
+    });
   }
 }

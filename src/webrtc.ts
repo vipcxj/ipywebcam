@@ -1,11 +1,30 @@
 /* eslint-disable @typescript-eslint/no-non-null-assertion */
-export function createPeerConnection(): RTCPeerConnection {
-  const config = {
-    sdpSemantics: 'unified-plan',
-    iceServers: [{ urls: ['stun:stun.l.google.com:19302'] }],
-  };
 
-  const pc = new RTCPeerConnection(config);
+const DEFAULT_ICE_SERVERS: RTCIceServer[] = [
+  { urls: ['stun:stun.l.google.com:19302'] },
+  { urls: ['stun:23.21.150.121'] },
+  { urls: ['stun:stun01.sipphone.com'] },
+  { urls: ['stun:stun.ekiga.net'] },
+  { urls: ['stun:stun.fwdnet.net'] },
+  { urls: ['stun:stun.ideasip.com'] },
+  { urls: ['stun:stun.iptel.org'] },
+  { urls: ['stun:stun.rixtelecom.se'] },
+  { urls: ['stun:stun.schlund.de'] },
+  { urls: ['stun:stunserver.org'] },
+  { urls: ['stun:stun.softjoys.com'] },
+  { urls: ['stun:stun.voiparound.com'] },
+  { urls: ['stun:stun.voipbuster.com'] },
+  { urls: ['stun:stun.voipstunt.com'] },
+  { urls: ['stun:stun.voxgratia.org'] },
+  { urls: ['stun:stun.xten.com'] },
+];
+
+export function createPeerConnection(
+  config: RTCConfiguration
+): RTCPeerConnection {
+  const pc = new RTCPeerConnection(
+    Object.assign({}, { iceServers: DEFAULT_ICE_SERVERS }, config || {})
+  );
 
   // register some listeners to help debugging
   pc.addEventListener(
@@ -33,6 +52,25 @@ export function createPeerConnection(): RTCPeerConnection {
   );
 
   return pc;
+}
+
+export async function waitForConnectionState(
+  pc: RTCPeerConnection,
+  checker: (state: RTCPeerConnectionState) => boolean
+): Promise<RTCPeerConnectionState> {
+  return new Promise<RTCPeerConnectionState>((resolve) => {
+    if (checker(pc.connectionState)) {
+      resolve(pc.connectionState);
+    } else {
+      const checkState = () => {
+        if (checker(pc.connectionState)) {
+          pc.removeEventListener('connectionstatechange', checkState);
+          resolve(pc.connectionState);
+        }
+      };
+      pc.addEventListener('connectionstatechange', checkState);
+    }
+  });
 }
 
 async function waitIceGathering(pc: RTCPeerConnection): Promise<void> {

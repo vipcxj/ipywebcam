@@ -14,7 +14,7 @@ import logging
 from aiortc import RTCPeerConnection, RTCSessionDescription
 from aiortc.contrib.media import MediaRelay
 from ipywidgets import DOMWidget, Dropdown
-from traitlets import List, Unicode, Dict, Enum, observe, link
+from traitlets import Any, Bool, Float, List, Unicode, Dict, Enum, observe, link
 from ._frontend import module_name, module_version
 
 logger = logging.getLogger("ipywebcam")
@@ -61,9 +61,27 @@ class WebCamWidget(DOMWidget):
         allow_none=True
     ).tag(sync=True)
     
+    iceServers = List(Any(), default_value=[]).tag(sync=True)
+    
     devices = List(Dict(), default_value=[]).tag(sync=True)
     
     device = Dict(default_value=None, allow_none=True).tag(sync=True)
+    
+    state = Unicode('closed', read_only=True).tag(sync=True)
+    
+    autoplay = Bool(True, allow_none=True).tag(sync=True)
+    
+    controls = Bool(True, allow_none=True).tag(sync=True)
+    
+    crossOrigin = Enum(set(['not-support', 'anonymous', 'use-credentials']), default_value='not-support').tag(sync=True)
+    
+    width = Float(default_value=None, allow_none=True).tag(sync=True)
+    
+    height = Float(default_value=None, allow_none=True).tag(sync=True)
+    
+    playsInline = Bool(True, allow_none=True).tag(sync=True)
+    
+    muted = Bool(False, allow_none=True).tag(sync=True)
     
     devicesWidget = Dropdown(options=[], value=None, description='cameras')
     
@@ -74,23 +92,13 @@ class WebCamWidget(DOMWidget):
         super().__init__(**kwargs)
         def transform_devices_to_options(devices): 
             options = [(device['label'] or device['deviceId'], device) for device in devices]
-            options.insert(0, None)
+            options.insert(0, ('', None))
             return options
         def transform_options_to_devices(options):
             return [device for (_, device) in options if device]
-        def transform_device_to_option(device):
-            if device:
-                return (device['label'] or device['deviceId'], device)
-            else:
-                return None
-        def transform_option_to_device(option):
-            if option:
-                (_, device) = option
-                return device
-            else:
-                return None
+
         link((self.devicesWidget, "options"), (self, "devices"), transform=(transform_options_to_devices, transform_devices_to_options))
-        link((self.devicesWidget, "value"), (self, "device"), transform=(transform_option_to_device, transform_device_to_option))
+        link((self.devicesWidget, "value"), (self, "device"))
         
     
     async def new_pc_connection(self, client_desc: dict[str, str]):
@@ -146,6 +154,10 @@ class WebCamWidget(DOMWidget):
             logger.debug("on_client_desc_change end")
         except Exception as e:
             logger.error(e)
+            
+    @observe("device")    
+    def on_device_change(self, change):
+        logger.debug(f"device change from {change.old} to {change.new}")
             
     def __del__(self):
         loop.create_task(self.close_pc_connection(self.pc))
