@@ -10,9 +10,12 @@ TODO: Add module docstring
 
 from os import path
 import asyncio
+import inspect
 import logging
+from typing import Awaitable, Callable, Union
 from aiortc import RTCPeerConnection, RTCSessionDescription
-from aiortc.contrib.media import MediaRelay
+from aiortc.contrib.media import MediaRelay, MediaStreamTrack
+from av import VideoFrame
 from ipywidgets import DOMWidget, Dropdown
 from traitlets import Any, Bool, Float, List, Unicode, Dict, Enum, observe, link
 from ._frontend import module_name, module_version
@@ -37,7 +40,40 @@ logger.info("I am loaded")
 
 relay = MediaRelay()
 
-class WebCamWidget(DOMWidget):
+class VideoTransformer:
+    def __init__(self, callback: Callable[[VideoFrame, dict], Union[VideoFrame, Awaitable[VideoFrame]]], context: dict = {}) -> None:
+        self.callback = callback
+        self.context = context
+        
+    async def transform(self, frame: VideoFrame) -> VideoFrame:
+        if inspect.iscoroutinefunction(self.callback):
+            frame = await self.callback(frame, self.context)
+        else:
+            frame = self.callback(frame, self.context)
+        return frame
+
+
+class WithTransformers:
+    transformers: list[VideoTransformer] = []
+
+class VideoTransformTrack(MediaStreamTrack):
+    kind = "video"
+    
+    def __init__(self, track: MediaStreamTrack, withTransformers: WithTransformers):
+        super().__init__()
+        self.track = track
+        self.withTransformers = withTransformers
+        
+    async def recv(self) -> VideoFrame:
+        frame: VideoFrame = await self.track.recv()
+        try:
+            for transformer in self.withTransformers.transformers:
+                frame = await transformer.transform(frame)
+            return frame
+        except Exception as e:
+            logger.exception(e)
+
+class WebCamWidget(DOMWidget, WithTransformers):
     """TODO: Add docstring here
     """
     _model_name = Unicode('WebCamModel').tag(sync=True)
@@ -100,6 +136,20 @@ class WebCamWidget(DOMWidget):
         link((self.devicesWidget, "options"), (self, "devices"), transform=(transform_options_to_devices, transform_devices_to_options))
         link((self.devicesWidget, "value"), (self, "device"))
         
+        
+    def add_transformer(self, callback: Callable[[VideoFrame, dict], Union[VideoFrame, Awaitable[VideoFrame]]]) -> VideoTransformer:
+        new_transformers = self.transformers.copy()
+        transformer = VideoTransformer(callback)
+        new_transformers.append(transformer)
+        self.transformers = new_transformers
+        return transformer
+    
+    
+    def remove_transformer(self, transformer: VideoTransformer) -> None:
+        new_transformers = self.transformers.copy()
+        new_transformers.remove(transformer)
+        self.transformers = new_transformers
+        
     
     async def new_pc_connection(self, client_desc: dict[str, str]):
         logger.debug("new_pc_connection")
@@ -121,7 +171,7 @@ class WebCamWidget(DOMWidget):
                 def on_track(track):
                     logger.info("Track %s received", track.kind)
                     if track.kind == "video":
-                        pc.addTrack(relay.subscribe(track))
+                        pc.addTrack(relay.subscribe(VideoTransformTrack(track, self)))
                         
                 # handle offer
                 await pc.setRemoteDescription(offer)
