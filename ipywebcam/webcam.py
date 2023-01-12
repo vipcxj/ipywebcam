@@ -21,9 +21,9 @@ from traitlets import Any, Bool, Float, List, Unicode, Dict, Enum, observe, link
 from ._frontend import module_name, module_version
 
 logger = logging.getLogger("ipywebcam")
-logger.setLevel(logging.DEBUG)
+logger.setLevel(logging.ERROR)
 fh = logging.FileHandler(path.join(path.dirname(__file__), "ipywebcam.log"))
-fh.setLevel(logging.DEBUG)
+fh.setLevel(logging.ERROR)
 logger.addHandler(fh)
 my_loop = False
 try:
@@ -74,7 +74,19 @@ class VideoTransformTrack(MediaStreamTrack):
             logger.exception(e)
 
 class WebCamWidget(DOMWidget, WithTransformers):
-    """TODO: Add docstring here
+    """
+    A widget for using web camera. Support processing frame in the backend using python at runtime.
+    
+    If there are multiple cameras on your computer, the widget provide a child widget 'devicesWidget' which can be used to select the active device.
+    
+    The widget also support many attribute of html5 tag 'video'.
+    * autoplay - Bool (default True)
+    * controls - Bool (default True)
+    * crossOrigin - Enum('not-support', 'anonymous', 'use-credentials') (default 'not-support')
+    * width - Float (default None)
+    * height - Float (default None)
+    * playsInline - Bool (default True)
+    * muted - Bool (default False)
     """
     _model_name = Unicode('WebCamModel').tag(sync=True)
     _model_module = Unicode(module_name).tag(sync=True)
@@ -96,8 +108,8 @@ class WebCamWidget(DOMWidget, WithTransformers):
         default_value=None,
         allow_none=True
     ).tag(sync=True)
-    
-    iceServers = List(Any(), default_value=[]).tag(sync=True)
+     
+    iceServers = List(Any(), default_value=[]).tag(sync=True)  
     
     devices = List(Dict(), default_value=[]).tag(sync=True)
     
@@ -138,6 +150,15 @@ class WebCamWidget(DOMWidget, WithTransformers):
         
         
     def add_transformer(self, callback: Callable[[VideoFrame, dict], Union[VideoFrame, Awaitable[VideoFrame]]]) -> VideoTransformer:
+        """Add a frame processor
+
+        Args:
+            callback (Callable[[VideoFrame, dict], Union[VideoFrame, Awaitable[VideoFrame]]]): 
+            a callback accept the frame and a context dict, and then return a processed frame. Support sync and async function
+
+        Returns:
+            VideoTransformer: A transformer instance which can be used to remove the callback by calling remove_transformer
+        """        
         new_transformers = self.transformers.copy()
         transformer = VideoTransformer(callback)
         new_transformers.append(transformer)
@@ -146,6 +167,11 @@ class WebCamWidget(DOMWidget, WithTransformers):
     
     
     def remove_transformer(self, transformer: VideoTransformer) -> None:
+        """Remove the frame processor
+
+        Args:
+            transformer (VideoTransformer): The transformer instance return by add_transformer
+        """        
         new_transformers = self.transformers.copy()
         new_transformers.remove(transformer)
         self.transformers = new_transformers
@@ -212,14 +238,3 @@ class WebCamWidget(DOMWidget, WithTransformers):
     def __del__(self):
         loop.create_task(self.close_pc_connection(self.pc))
         return super().__del__()
-            
-    
-"""     @observe("devices")    
-    def on_devices_change(self, change):
-        try:
-            logger.debug(change.new)
-            self.devicesWidget.options = [(device['label'] or device['deviceId'], device['deviceId']) for device in change.new]
-            self.devicesWidget.value = None
-        except Exception as e:
-            logger.exception(e) """
-                  
