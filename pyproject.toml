@@ -103,7 +103,7 @@ field = [
 ]
 file = [
     { src = "pyproject.toml", version_template = "version = \"{major}.{minor}.{patch}{channel}{release}\"" },
-    { src = "ipywebcam/_version.py" },
+    { src = "ipywebcam/_version.py", version_template = "version_info = ({major}, {minor}, {patch}, '{channel}')" },
 ]
 
 [tool.tbump.version]
