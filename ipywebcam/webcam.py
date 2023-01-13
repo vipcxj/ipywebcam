@@ -13,7 +13,7 @@ import asyncio
 import inspect
 import logging
 from typing import Awaitable, Callable, Union
-from aiortc import RTCPeerConnection, RTCSessionDescription
+from aiortc import RTCConfiguration, RTCIceServer, RTCPeerConnection, RTCSessionDescription
 from aiortc.contrib.media import MediaRelay, MediaStreamTrack
 from av import VideoFrame
 from ipywidgets import DOMWidget, Dropdown
@@ -21,9 +21,9 @@ from traitlets import Any, Bool, Float, List, Unicode, Dict, Enum, observe, link
 from ._frontend import module_name, module_version
 
 logger = logging.getLogger("ipywebcam")
-logger.setLevel(logging.ERROR)
+logger.setLevel(logging.DEBUG)
 fh = logging.FileHandler(path.join(path.dirname(__file__), "ipywebcam.log"))
-fh.setLevel(logging.ERROR)
+fh.setLevel(logging.DEBUG)
 logger.addHandler(fh)
 my_loop = False
 try:
@@ -36,6 +36,25 @@ except RuntimeError:
 
 
 logger.info("I am loaded")
+
+
+DEFAULT_ICE_SERVERS: list[RTCIceServer] = [
+    RTCIceServer(urls='stun:stun.l.google.com:19302'),
+    RTCIceServer(urls='stun:23.21.150.121'),
+    RTCIceServer(urls='stun:stun01.sipphone.com'),
+    RTCIceServer(urls='stun:stun.ekiga.net'),
+    RTCIceServer(urls='stun:stun.fwdnet.net'),
+    RTCIceServer(urls='stun:stun.ideasip.com'),
+    RTCIceServer(urls='stun:stun.iptel.org'),
+    RTCIceServer(urls='stun:stun.rixtelecom.se'),
+    RTCIceServer(urls='stun:stun.schlund.de'),
+    RTCIceServer(urls='stun:stunserver.org'),
+    RTCIceServer(urls='stun:stun.softjoys.com'),
+    RTCIceServer(urls='stun:stun.voiparound.com'),
+    RTCIceServer(urls='stun:stun.voipstunt.com'),
+    RTCIceServer(urls='stun:stun.voxgratia.org'),
+    RTCIceServer(urls='stun:stun.xten.com'),
+];
 
 
 relay = MediaRelay()
@@ -184,7 +203,19 @@ class WebCamWidget(DOMWidget, WithTransformers):
                 self.state = -1
                 await self.close_pc_connection(self.pc)
                 offer = RTCSessionDescription(**client_desc)
-                self.pc = pc = RTCPeerConnection()
+                self.pc = pc = RTCPeerConnection(RTCConfiguration(DEFAULT_ICE_SERVERS))
+                
+                @pc.on("icegatheringstatechange")
+                async def on_iceconnectionstatechange():
+                    logger.info("Ice connection state is %s", pc.iceGatheringState)
+                
+                @pc.on("iceconnectionstatechange")
+                async def on_iceconnectionstatechange():
+                    logger.info("Ice connection state is %s", pc.iceConnectionState)
+                    
+                @pc.on("signalingstatechange")
+                async def on_signalingstatechange():
+                    logger.info("Signaling state is %s", pc.signalingState)
                 
                 @pc.on("connectionstatechange")    
                 async def on_connectionstatechange():
@@ -192,6 +223,10 @@ class WebCamWidget(DOMWidget, WithTransformers):
                     if pc.connectionState == "failed":
                         await self.close_pc_connection(pc)
                         self.state = 2
+                        
+                @pc.on("error")
+                async def on_error(error):
+                    logger.exception(error)
                                 
                 @pc.on("track")
                 def on_track(track):
