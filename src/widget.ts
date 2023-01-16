@@ -211,7 +211,7 @@ export class WebCamModel extends DOMWidgetModel {
         });
         const pcState = await waitForConnectionState(
           pc,
-          (state) => state !== 'connecting'
+          (state) => state !== 'connecting' && state !== 'new'
         );
         if (pcState === 'connected') {
           this.setState('connected');

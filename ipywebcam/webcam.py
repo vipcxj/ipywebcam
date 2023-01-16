@@ -12,7 +12,7 @@ from os import path
 import asyncio
 import inspect
 import logging
-from typing import Awaitable, Callable, Union
+from typing import Awaitable, Callable, Optional, Union
 from aiortc import RTCConfiguration, RTCIceServer, RTCPeerConnection, RTCSessionDescription
 from aiortc.contrib.media import MediaRelay, MediaStreamTrack
 from av import VideoFrame
@@ -36,26 +36,6 @@ except RuntimeError:
 
 
 logger.info("I am loaded")
-
-
-DEFAULT_ICE_SERVERS: list[RTCIceServer] = [
-    RTCIceServer(urls='stun:stun.l.google.com:19302'),
-    RTCIceServer(urls='stun:23.21.150.121'),
-    RTCIceServer(urls='stun:stun01.sipphone.com'),
-    RTCIceServer(urls='stun:stun.ekiga.net'),
-    RTCIceServer(urls='stun:stun.fwdnet.net'),
-    RTCIceServer(urls='stun:stun.ideasip.com'),
-    RTCIceServer(urls='stun:stun.iptel.org'),
-    RTCIceServer(urls='stun:stun.rixtelecom.se'),
-    RTCIceServer(urls='stun:stun.schlund.de'),
-    RTCIceServer(urls='stun:stunserver.org'),
-    RTCIceServer(urls='stun:stun.softjoys.com'),
-    RTCIceServer(urls='stun:stun.voiparound.com'),
-    RTCIceServer(urls='stun:stun.voipstunt.com'),
-    RTCIceServer(urls='stun:stun.voxgratia.org'),
-    RTCIceServer(urls='stun:stun.xten.com'),
-];
-
 
 relay = MediaRelay()
 
@@ -155,7 +135,18 @@ class WebCamWidget(DOMWidget, WithTransformers):
     pc: RTCPeerConnection = None
     state: int = 0
     
-    def __init__(self, **kwargs):
+    def __init__(
+        self,
+        iceServers: Optional[list[RTCIceServer]] = None,
+        autoplay: Optional[bool] = None,
+        controls: Optional[bool] = None,
+        crossOrigin: Optional[bool] = None,
+        width: Optional[float] = None,
+        height: Optional[float] = None,
+        playsInline: Optional[bool] = None,
+        muted: Optional[bool] = None,
+        **kwargs
+    ):
         super().__init__(**kwargs)
         def transform_devices_to_options(devices): 
             options = [(device['label'] or device['deviceId'], device) for device in devices]
@@ -166,6 +157,22 @@ class WebCamWidget(DOMWidget, WithTransformers):
 
         link((self.devicesWidget, "options"), (self, "devices"), transform=(transform_options_to_devices, transform_devices_to_options))
         link((self.devicesWidget, "value"), (self, "device"))
+        if iceServers is not None:
+            self.iceServers = iceServers
+        if autoplay is not None:
+            self.autoplay = autoplay
+        if controls is not None:
+            self.controls = controls
+        if crossOrigin is not None:
+            self.crossOrigin = crossOrigin
+        if width is not None:
+            self.width = width
+        if height is not None:
+            self.height = height
+        if playsInline is not None:
+            self.playsInline = playsInline
+        if muted is not None:
+            self.muted = muted
         
         
     def add_transformer(self, callback: Callable[[VideoFrame, dict], Union[VideoFrame, Awaitable[VideoFrame]]]) -> VideoTransformer:
@@ -196,6 +203,22 @@ class WebCamWidget(DOMWidget, WithTransformers):
         self.transformers = new_transformers
         
     
+    def get_ice_servers(self) -> list[RTCIceServer]:
+        servers: list[RTCIceServer] = []
+        if self.iceServers and len(self.iceServers) > 0:
+            for config in self.iceServers:
+                if isinstance(config, str):
+                    servers.append(RTCIceServer(urls=config))
+                else:
+                    urls = config.get('urls')
+                    if not urls:
+                        raise RuntimeError('urls attribute of ice server is required.')
+                    username = config.get('username')
+                    credential = config.get('credential')
+                    credentialType = config.get('credentialType') or 'password'
+                    servers.append(RTCIceServer(urls=urls, username=username, credential=credential, credentialType=credentialType))
+        return servers
+    
     async def new_pc_connection(self, client_desc: dict[str, str]):
         logger.debug("new_pc_connection")
         if self.state >= 0:
@@ -203,7 +226,7 @@ class WebCamWidget(DOMWidget, WithTransformers):
                 self.state = -1
                 await self.close_pc_connection(self.pc)
                 offer = RTCSessionDescription(**client_desc)
-                self.pc = pc = RTCPeerConnection(RTCConfiguration(DEFAULT_ICE_SERVERS))
+                self.pc = pc = RTCPeerConnection(RTCConfiguration(self.get_ice_servers()))
                 
                 @pc.on("icegatheringstatechange")
                 async def on_iceconnectionstatechange():
@@ -239,8 +262,9 @@ class WebCamWidget(DOMWidget, WithTransformers):
                 # send answer
                 answer = await pc.createAnswer()
                 await pc.setLocalDescription(answer)
-                logger.debug(f"send answer: {answer} to client.")
-                self.server_desc = { "sdp": answer.sdp, "type": answer.type }
+                # my_sdp = re.sub(r'c=IN IP4 (\d+\.\d+\.\d+\.\d+)', 'c=IN IP4 140.210.206.15', pc.localDescription.sdp)
+                my_sdp = pc.localDescription.sdp
+                self.server_desc = { "sdp": my_sdp, "type": pc.localDescription.type }
                 self.state = 1
             except Exception as e:
                 logger.exception(e)

@@ -8,6 +8,10 @@ const rules = [
   { test: /\.css$/, use: ['style-loader', 'css-loader']}
 ];
 
+const watchOptions = {
+  ignored: /node_modules/,
+};
+
 // Packages that shouldn't be bundled but loaded at runtime
 const externals = ['@jupyter-widgets/base'];
 
@@ -37,6 +41,7 @@ module.exports = [
     devtool: 'source-map',
     externals,
     resolve,
+    watchOptions,
   },
 
   /**
@@ -64,6 +69,7 @@ module.exports = [
     },
     externals,
     resolve,
+    watchOptions,
   },
 
 
@@ -86,6 +92,7 @@ module.exports = [
     devtool: 'source-map',
     externals,
     resolve,
+    watchOptions,
   }
 
 ];

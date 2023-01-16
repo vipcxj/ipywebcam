@@ -26,6 +26,14 @@ export function createPeerConnection(
     Object.assign({}, { iceServers: DEFAULT_ICE_SERVERS }, config || {})
   );
 
+  pc.addEventListener(
+    'connectionstatechange',
+    () => {
+      console.log(`connection -> ${pc.connectionState}`);
+    },
+    false
+  );
+
   // register some listeners to help debugging
   pc.addEventListener(
     'icegatheringstatechange',
@@ -93,7 +101,7 @@ type MediaKind = 'video' | 'audio';
 
 export async function negotiate(
   pc: RTCPeerConnection,
-  offerFunc: (
+  answerFunc: (
     offer: RTCSessionDescriptionInit
   ) => Promise<RTCSessionDescriptionInit>,
   codec?: { video?: string; audio?: string }
@@ -110,8 +118,8 @@ export async function negotiate(
       offer.sdp = sdpFilterCodec('video', codec.video, offer.sdp!);
     }
   }
-  const remoteOffer = await offerFunc(offer);
-  await pc.setRemoteDescription(remoteOffer);
+  const answer = await answerFunc(offer);
+  await pc.setRemoteDescription(answer);
 }
 
 function arrayInclude<T>(arr: T[], target: T): boolean {
