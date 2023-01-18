@@ -217,6 +217,8 @@ class WebCamWidget(DOMWidget, WithTransformers):
                     credential = config.get('credential')
                     credentialType = config.get('credentialType') or 'password'
                     servers.append(RTCIceServer(urls=urls, username=username, credential=credential, credentialType=credentialType))
+        else:
+            servers.append(RTCIceServer(urls='stun:stun.l.google.com:19302'))
         return servers
     
     async def new_pc_connection(self, client_desc: dict[str, str]):
