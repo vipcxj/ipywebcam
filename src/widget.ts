@@ -13,12 +13,17 @@ import {
   negotiate,
   waitForConnectionState,
 } from './webrtc';
+import { arrayInclude, arrayFind } from './utils';
 import { MODULE_NAME, MODULE_VERSION } from './version';
 
 // Import the CSS
 import '../css/widget.css';
 
 type State = 'closing' | 'connecting' | 'connected' | 'closed' | 'error';
+
+const supportsSetCodecPreferences: boolean =
+  window.RTCRtpTransceiver &&
+  'setCodecPreferences' in window.RTCRtpTransceiver.prototype;
 
 export class WebCamModel extends DOMWidgetModel {
   defaults(): Backbone.ObjectHash {
@@ -33,8 +38,15 @@ export class WebCamModel extends DOMWidgetModel {
       server_desc: null,
       client_desc: null,
       iceServers: [],
-      devices: [],
-      device: null,
+      constraints: null,
+      video_input_devices: [],
+      video_input_device: null,
+      audio_input_devices: [],
+      audio_input_device: null,
+      audio_output_devices: [],
+      audio_output_device: null,
+      video_codecs: [],
+      video_codec: null,
       state: 'closed',
       autoplay: true,
       controls: true,
@@ -49,12 +61,20 @@ export class WebCamModel extends DOMWidgetModel {
   // eslint-disable-next-line @typescript-eslint/explicit-module-boundary-types
   constructor(...args: any[]) {
     super(...args);
+    this.fetchCodecs();
     this.fetchDevices();
-    this.on('change:device', () => {
-      this.connect(undefined, true);
+    this.on('change:video_input_device', (...args) => {
+      console.log('change:video_input_device');
+      console.log(args);
+      this.connect(undefined, true, true);
+    });
+    this.on('change:audio_input_device', (...args) => {
+      console.log('change:audio_input_device');
+      console.log(args);
+      this.connect(undefined, true, true);
     });
     this.on('change:iceServers', () => {
-      this.connect(undefined, true);
+      this.connect(undefined, true, true);
     });
   }
 
@@ -110,15 +130,45 @@ export class WebCamModel extends DOMWidgetModel {
     this.set('state', state);
   };
 
+  getConstraints = (): MediaStreamConstraints => {
+    let { video, audio } = (this.get(
+      'constraints'
+    ) as MediaStreamConstraints) || { audio: false, video: true };
+    const { deviceId: videoId } = this.get('video_input_device') || {};
+    const { deviceId: audioId } = this.get('audio_input_device') || {};
+    if (audio && audioId) {
+      if (typeof audio === 'boolean') {
+        audio = {
+          deviceId: audioId,
+        };
+      } else {
+        audio.deviceId = audioId;
+      }
+    }
+    if (video && videoId) {
+      if (typeof video === 'boolean') {
+        video = {
+          deviceId: videoId,
+        };
+      } else {
+        video.deviceId = videoId;
+      }
+    }
+    return { video, audio };
+  };
+
   closePeer = async (): Promise<void> => {
     const state = await this.waitForStateIn('closed', 'connected', 'error');
+    if (state === 'closed' || state === 'error') {
+      return;
+    }
     const pc = this.pc;
-    if (!pc || state === 'closed' || state === 'error') {
+    if (!pc) {
+      this.setState('closed');
       return;
     }
     this.setState('closing');
     try {
-      this.resetPeer();
       pc.close();
       if (pc.connectionState !== 'closed') {
         await new Promise<void>((resolve) => {
@@ -129,19 +179,70 @@ export class WebCamModel extends DOMWidgetModel {
           });
         });
       }
+      this.resetPeer();
       this.setState('closed');
     } catch (err) {
       this.setState('error');
     }
   };
 
-  fetchDevices = async (): Promise<void> => {
-    console.log('fetchDevices');
-    let devices = await navigator.mediaDevices.enumerateDevices();
-    devices = devices.filter((device) => device.kind === 'videoinput');
-    console.log(devices);
-    this.set('devices', devices);
+  fetchCodecs = (): void => {
+    const codecs = this.getCodecs();
+    this.set('video_codecs', codecs);
     this.save_changes();
+  };
+
+  fetchDevices = async (): Promise<void> => {
+    const stream = await navigator.mediaDevices.getUserMedia({
+      video: true,
+      audio: true,
+    });
+    try {
+      const devices = await navigator.mediaDevices.enumerateDevices();
+      const videoInputs = devices.filter(
+        (device) => device.kind === 'videoinput' && device.deviceId
+      );
+      this.set('video_input_devices', videoInputs);
+      if (videoInputs.length > 0) {
+        this.set('video_input_device', videoInputs[0]);
+      }
+      const audioInputs = devices.filter(
+        (device) => device.kind === 'audioinput' && device.deviceId
+      );
+      this.set('audio_input_devices', audioInputs);
+      if (audioInputs.length > 0) {
+        this.set('audio_input_device', audioInputs[0]);
+      }
+      const audioOutputs = devices.filter(
+        (device) => device.kind === 'audiooutput' && device.deviceId
+      );
+      this.set('audio_output_devices', audioOutputs);
+      if (audioOutputs.length > 0) {
+        this.set('audio_output_device', audioOutputs[0]);
+      }
+      this.save_changes();
+    } finally {
+      stream.getTracks().forEach((track) => track.stop());
+    }
+  };
+
+  getCodecs = (): string[] => {
+    if (supportsSetCodecPreferences) {
+      const { codecs = [] } = RTCRtpSender.getCapabilities('video') || {};
+      return codecs
+        .filter(
+          (codec) =>
+            !arrayInclude(
+              ['video/red', 'video/ulpfec', 'video/rtx'],
+              codec.mimeType
+            )
+        )
+        .map((codec) => {
+          return (codec.mimeType + ' ' + (codec.sdpFmtpLine || '')).trim();
+        });
+    } else {
+      return [];
+    }
   };
 
   getPeerConfig = (): RTCConfiguration => {
@@ -159,12 +260,55 @@ export class WebCamModel extends DOMWidgetModel {
     return config;
   };
 
+  syncDevice = (track: MediaStreamTrack): void => {
+    let curDeviceId: string | undefined;
+    if (typeof track.getCapabilities !== 'undefined') {
+      curDeviceId = track.getCapabilities().deviceId;
+    } else {
+      curDeviceId = track.getSettings().deviceId;
+    }
+    let change = false;
+    if (track.kind === 'video') {
+      const { deviceId } = this.get('video_input_device') || {};
+      if (curDeviceId !== deviceId) {
+        const devices: MediaDeviceInfo[] =
+          this.get('video_input_devices') || [];
+        const device = arrayFind(
+          devices,
+          ({ deviceId }, ignored) => curDeviceId === deviceId
+        );
+        this.set('video_input_device', device || null);
+        change = true;
+      }
+    }
+    if (track.kind === 'audio') {
+      const { deviceId } = this.get('audio_input_device') || {};
+      if (curDeviceId !== deviceId) {
+        const devices: MediaDeviceInfo[] =
+          this.get('audio_input_devices') || [];
+        const device = arrayFind(
+          devices,
+          ({ deviceId }, ignored) => curDeviceId === deviceId
+        );
+        this.set('audio_input_device', device || null);
+        change = true;
+      }
+    }
+    if (change) {
+      this.save_changes();
+    }
+  };
+
   connect = async (
     video: HTMLVideoElement | undefined,
-    force_new_pc = false
+    force_reconnect = false,
+    only_reconnect = false
   ): Promise<void> => {
     const state = await this.waitForStateIn('closed', 'connected', 'error');
     if (state === 'closed' || state === 'error') {
+      if (only_reconnect) {
+        return;
+      }
       try {
         this.setState('connecting');
         const pc = createPeerConnection(this.getPeerConfig());
@@ -189,14 +333,12 @@ export class WebCamModel extends DOMWidgetModel {
             this.server_stream = evt.streams[0];
           }
         });
-        const device = this.get('device');
-        const constraints = {
-          audio: false,
-          video: device ? { deviceId: device.deviceId } : true,
-        };
-        const stream = await navigator.mediaDevices.getUserMedia(constraints);
+        const stream = await navigator.mediaDevices.getUserMedia(
+          this.getConstraints()
+        );
         this.client_stream = stream;
         stream.getTracks().forEach((track) => {
+          // this.syncDevice(track);
           pc.addTrack(track, stream);
         });
         await negotiate(pc, (offer) => {
@@ -222,9 +364,9 @@ export class WebCamModel extends DOMWidgetModel {
         this.setState('error');
         console.error(err);
       }
-    } else if (force_new_pc) {
+    } else if (force_reconnect) {
       await this.closePeer();
-      await this.connect(video, force_new_pc);
+      await this.connect(video, force_reconnect);
     } else {
       this.bindVideo(video);
     }
@@ -251,6 +393,16 @@ export class WebCamModel extends DOMWidgetModel {
   };
 }
 
+async function attachSinkId(element: HTMLMediaElement, sinkId: string) {
+  if (typeof (element as any).sinkId !== 'undefined') {
+    if (sinkId) {
+      await (element as any).setSinkId(sinkId);
+    }
+  } else {
+    console.warn('Browser does not support output device selection.');
+  }
+}
+
 export class WebCamView extends DOMWidgetView {
   pc: RTCPeerConnection | undefined;
 
@@ -264,6 +416,12 @@ export class WebCamView extends DOMWidgetView {
       if (model.getState() === 'connected') {
         model.connect(video);
       }
+    });
+    const { deviceId } = this.model.get('audio_output_device') || {};
+    attachSinkId(video, deviceId);
+    this.model.on('change:audio_output_device', () => {
+      const { deviceId } = this.model.get('audio_output_device') || {};
+      attachSinkId(video, deviceId);
     });
     video.autoplay = this.model.get('autoplay');
     this.model.on('change:autoplay', () => {

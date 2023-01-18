@@ -1,5 +1,7 @@
 /* eslint-disable @typescript-eslint/no-non-null-assertion */
 
+import { arrayInclude } from './utils';
+
 const DEFAULT_ICE_SERVERS: RTCIceServer[] = [
   { urls: ['stun:stun.l.google.com:19302'] },
   { urls: ['stun:23.21.150.121'] },
@@ -120,10 +122,6 @@ export async function negotiate(
   }
   const answer = await answerFunc(offer);
   await pc.setRemoteDescription(answer);
-}
-
-function arrayInclude<T>(arr: T[], target: T): boolean {
-  return !!~arr.indexOf(target);
 }
 
 function sdpFilterCodec(kind: MediaKind, codec: string, realSdp: string) {
