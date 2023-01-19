@@ -19,7 +19,14 @@ import { MODULE_NAME, MODULE_VERSION } from './version';
 // Import the CSS
 import '../css/widget.css';
 
-type State = 'closing' | 'connecting' | 'connected' | 'closed' | 'error';
+type State =
+  | 'closing'
+  | 'connecting'
+  | 'connected'
+  | 'closed'
+  | 'error'
+  | 'new'
+  | 'ready';
 
 const supportsSetCodecPreferences: boolean =
   window.RTCRtpTransceiver &&
@@ -47,7 +54,7 @@ export class WebCamModel extends DOMWidgetModel {
       audio_output_device: null,
       video_codecs: [],
       video_codec: null,
-      state: 'closed',
+      state: 'new',
       autoplay: true,
       controls: true,
       crossOrigin: 'not-support',
@@ -75,6 +82,14 @@ export class WebCamModel extends DOMWidgetModel {
     });
     this.on('change:iceServers', () => {
       this.connect(undefined, true, true);
+    });
+    this.on('msg:custom', ({ msg }) => {
+      if (msg === 'ready') {
+        const state = this.getState();
+        if (state === 'new') {
+          this.setState('ready');
+        }
+      }
     });
   }
 
@@ -158,7 +173,18 @@ export class WebCamModel extends DOMWidgetModel {
   };
 
   closePeer = async (): Promise<void> => {
-    const state = await this.waitForStateIn('closed', 'connected', 'error');
+    const state = await this.waitForStateIn(
+      'closed',
+      'connected',
+      'error',
+      'new',
+      'error'
+    );
+    if (state === 'new' || state === 'ready') {
+      throw new Error(
+        `This should not happen. We can't close the peer when the state is ${state}. Because at this time, we shouldn't start the peer.`
+      );
+    }
     if (state === 'closed' || state === 'error') {
       return;
     }
@@ -304,8 +330,13 @@ export class WebCamModel extends DOMWidgetModel {
     force_reconnect = false,
     only_reconnect = false
   ): Promise<void> => {
-    const state = await this.waitForStateIn('closed', 'connected', 'error');
-    if (state === 'closed' || state === 'error') {
+    const state = await this.waitForStateIn(
+      'closed',
+      'connected',
+      'error',
+      'ready'
+    );
+    if (state === 'closed' || state === 'error' || state === 'ready') {
       if (only_reconnect) {
         return;
       }

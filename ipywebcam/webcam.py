@@ -155,17 +155,25 @@ class WebCamWidget(DOMWidget, WithMediaTransformers):
     audio_input_devices = List(Dict(), default_value=[]).tag(sync=True)
     audio_output_devices = List(Dict(), default_value=[]).tag(sync=True)
     
+    video_input_devices_ready: bool = False
+    audio_input_devices_ready: bool = False
+    audio_output_devices_ready: bool = False
+    
     video_input_device = Dict(default_value=None, allow_none=True).tag(sync=True)
+    video_input_device_dirty = False
     audio_input_device = Dict(default_value=None, allow_none=True).tag(sync=True)
+    audio_input_device_dirty = False
     audio_output_device = Dict(default_value=None, allow_none=True).tag(sync=True)
+    audio_output_device_dirty = False
     
     video_input_selector = Dropdown(options=[], value=None, description='Video input device')
     audio_input_selector = Dropdown(options=[], value=None, description='Audio input device')
     audio_output_selector = Dropdown(options=[], value=None, description='Audio output device')
     
     video_codecs = List(Unicode(), default_value=[]).tag(sync=True)
-    video_codec = Unicode(default_value=None, allow_none=True)
+    video_codec = Unicode(default_value=None, allow_none=True).tag(sync=True)
     video_codec_selector = Dropdown(options=[], value=None, description='Video codec')
+    video_codecs_ready = False
     
     pc: RTCPeerConnection = None
     state: int = 0
@@ -188,6 +196,7 @@ class WebCamWidget(DOMWidget, WithMediaTransformers):
             return [(device['label'] or device['deviceId'], device) for device in devices]
         def transform_options_to_devices(options):
             return [device for (_, device) in options if device]
+        self.on_displayed(lambda w: print(type(w)))
 
         link((self.video_input_selector, "options"), (self, "video_input_devices"), transform=(transform_options_to_devices, transform_devices_to_options))
         link((self.video_input_selector, "value"), (self, "video_input_device"))
@@ -215,6 +224,162 @@ class WebCamWidget(DOMWidget, WithMediaTransformers):
             self.playsInline = playsInline
         if muted is not None:
             self.muted = muted
+            
+    def get_device_selector(self, type: str) -> Dropdown:
+        if type == 'video_input':
+            return self.video_input_selector
+        elif type == 'audio_input':
+            return self.audio_input_selector
+        elif type == 'audio_output':
+            return self.audio_output_selector
+        else:
+            raise RuntimeError(f'Invalid device type {type}')
+        
+    def is_device_dirty(self, type: str) -> bool:
+        if type == 'video_input':
+            return self.video_input_device_dirty
+        elif type == 'audio_input':
+            return self.audio_input_device_dirty
+        elif type == 'audio_output':
+            return self.audio_output_device_dirty
+        else:
+            raise RuntimeError(f'Invalid device type {type}')
+        
+    def set_device_dirty(self, type: str, dirty: bool) -> None:
+        if type == 'video_input':
+            self.video_input_device_dirty = dirty
+        elif type == 'audio_input':
+            self.audio_input_device_dirty = dirty
+        elif type == 'audio_output':
+            self.audio_output_device_dirty = dirty
+        else:
+            raise RuntimeError(f'Invalid device type {type}')
+        
+    def get_device(self, type: str) -> dict:
+        if type == 'video_input':
+            return self.video_input_device
+        elif type == 'audio_input':
+            return self.audio_input_device
+        elif type == 'audio_output':
+            return self.audio_output_device
+        else:
+            raise RuntimeError(f'Invalid device type {type}')
+        
+    def _set_device(self, type: str, device: Optional[dict]) -> None:
+        if type == 'video_input':
+            self.video_input_device = device
+        elif type == 'audio_input':
+            self.audio_input_device = device
+        elif type == 'audio_output':
+            self.audio_output_device = device
+        else:
+            raise RuntimeError(f'Invalid device type {type}')
+            
+        
+    def set_device(self, type: str, device: Optional[dict], dirty: bool = False) -> bool:
+        """set device
+
+        Args:
+            type (str): device type
+            device (Optional[dict]): device info
+            dirty (bool, optional): If true, the device should be sync to selector immediately or later. 
+            If false and current device is dirty, the input device param is ignored and the current device info should be sync to the selector immediately or later. 
+            Defaults to False.
+            
+        Returns:
+            Wether the device is changed.
+
+        Raises:
+            RuntimeError: invalid type value
+        """        
+        selector = self.get_device_selector(type)
+        cur_device = self.get_device(type)
+        if (cur_device == device) {
+            return False
+        }
+        if dirty:
+            self._set_device(type, device)
+            if device and self.is_in_selector(selector, device):
+                selector.value = device
+                self.set_device_dirty(type, False)
+            else:
+                self.set_device_dirty(type, True)
+            return True
+        else:
+            if self.is_device_dirty(type):
+                cur_device = self.get_device(type)
+                if cur_device and cur_device != selector.value and self.is_in_selector(selector, cur_device):
+                    selector.value = cur_device
+                    self.set_device_dirty(type, False)
+                return False
+            else:
+                self._set_device(type, device)
+                return True
+                    
+        
+    def get_device_id(self, device: Optional[dict]) -> Optional[str]:
+        return device['deviceId'] if device is not None else None
+    
+    def is_in_selector(self, selector: Dropdown, device: dict):
+        pass
+            
+    def bind_device_selector(self, type: str):
+        selector = self.get_device_selector(type)
+        selector.on_displayed(lambda w: self.request_devices(type))
+        def handle_device_change(change):
+            old_id = self.get_device_id(self.get_device(type))
+            new_id = self.get_device_id(change.new)
+            if old_id != new_id:
+                if self.set_device(type, change.new):
+                    self.send_device_id(type, new_id)
+        selector.observe(handle_device_change, 'value')
+    
+    def request_devices(self, type: str):
+        self.send({ 'msg': 'request_devices', 'type': type })
+        
+    def send_device_id(self, type: str, device_id: Optional[str]) -> None:
+        self.send({ 'msg': 'send_device_id', 'type': type, 'data': device_id })
+    
+    
+    def handle_answer_request_devices(self, type: str, devices: list):
+        """The answer of 'request_devices'
+
+        Args:
+            type (str): device type
+            devices (list): list of device info
+        """
+        selector = self.get_device_selector(type)
+        selector.options = devices
+        
+    def handle_answer_sync_device(self, type: str, device: Optional[str], req_id: str) -> None:
+        """The client request that the server should use its device info
+
+        Args:
+            type (str): device type
+            device (Optional[str]): device info
+            req_id (str): used to 
+        """
+        self.set_device(type, device, True)
+        
+    def handle_request_device(self, type: str) -> None:
+        """client request the device info stored in the server
+
+        Args:
+            type (str): device type
+        """
+        self.send({ 'msg': 'answer_device', 'type': type, 'device': self.get_device(type) })
+                
+    
+    def _handle_custom_msg(self, content, buffers):
+        super()._handle_custom_msg(content, buffers)
+        msg = content.get('msg')
+        if msg == 'answer_devices':
+            self.handle_answer_request_devices(content['type'], content['devices'])
+        elif msg == 'sync_device':
+            self.handle_answer_sync_device(content['type'], content['device'])
+        elif msg == 'request_device':
+            self.handle_request_device(content['type'])
+            
         
         
     def add_video_transformer(self, callback: Callable[[VideoFrame, dict], Union[VideoFrame, Awaitable[VideoFrame]]]) -> MediaTransformer[VideoFrame]:
@@ -362,7 +527,33 @@ class WebCamWidget(DOMWidget, WithMediaTransformers):
             logger.debug("on_client_desc_change end")
         except Exception as e:
             logger.error(e)
-
+            
+            
+    def may_send_ready(self) -> None:
+        if (self.video_codecs_ready and self.video_input_devices_ready and self.audio_input_devices_ready and self.audio_output_devices_ready):
+            self.send({ 'msg': 'ready' })
+            
+    
+    @observe("video_input_devices")
+    def on_video_input_devices_change(self, change):
+        self.video_input_devices_ready = True
+        self.may_send_ready()
+        
+    @observe("audio_input_devices")
+    def on_audio_input_devices_change(self, change):
+        self.audio_input_devices_ready = True
+        self.may_send_ready()
+        
+    @observe("audio_output_devices")
+    def on_audio_output_devices_change(self, change):
+        self.audio_output_devices_ready = True
+        self.may_send_ready()
+        
+    @observe("video_codecs")
+    def on_video_codecs_change(self, change):
+        self.video_codecs_ready = True
+        self.may_send_ready()
+        
             
     def __del__(self):
         loop.create_task(self.close_pc_connection(self.pc))
