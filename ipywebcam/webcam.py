@@ -225,6 +225,19 @@ class WebCamWidget(DOMWidget, WithMediaTransformers):
         if muted is not None:
             self.muted = muted
             
+            
+    def send_command(self, cmd: str, args: dict, on_result: Callable[[any], None]) -> None:
+        self.send({ "cmd": cmd, "args": args })
+        def callback(_, content) -> None:
+            if isinstance(content, dict) and content.get("ans") == cmd:
+                on_result(content.get("res"))
+                self.on_msg(callback, True)
+        logger.log(f'add command on_result callback: {id(callback)}')
+        self.on_msg(callback)
+        
+    def answer(self, cmd: str, content: dict) -> None:
+        self.send({ "ans": cmd, "res": content })
+            
     def get_device_selector(self, type: str) -> Dropdown:
         if type == 'video_input':
             return self.video_input_selector
@@ -294,9 +307,9 @@ class WebCamWidget(DOMWidget, WithMediaTransformers):
         """        
         selector = self.get_device_selector(type)
         cur_device = self.get_device(type)
-        if (cur_device == device) {
+        if cur_device == device:
             return False
-        }
+        
         if dirty:
             self._set_device(type, device)
             if device and self.is_in_selector(selector, device):
@@ -372,6 +385,9 @@ class WebCamWidget(DOMWidget, WithMediaTransformers):
     
     def _handle_custom_msg(self, content, buffers):
         super()._handle_custom_msg(content, buffers)
+        if isinstance(content, dict) and "ans" in content:
+            cmd = content.get("ans")
+            
         msg = content.get('msg')
         if msg == 'answer_devices':
             self.handle_answer_request_devices(content['type'], content['devices'])
