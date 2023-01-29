@@ -32,6 +32,38 @@ const supportsSetCodecPreferences: boolean =
   window.RTCRtpTransceiver &&
   'setCodecPreferences' in window.RTCRtpTransceiver.prototype;
 
+interface BaseCommandMessage {
+  cmd: string;
+  id: string;
+  args: Record<string, any>;
+}
+
+type DeviceType = 'video_input' | 'audio_input' | 'audio_output';
+
+interface RequestDevicesArgs {
+  type: DeviceType;
+}
+
+interface RequestDevicesMessage extends BaseCommandMessage {
+  cmd: 'request_devices';
+  args: RequestDevicesArgs;
+}
+
+interface NotifyDeviceChangeArgs {
+  type: DeviceType;
+  change: {
+    old: any;
+    new: any;
+  };
+}
+
+interface NotifyDeviceChangeMessage extends BaseCommandMessage {
+  cmd: 'notify_device_change';
+  args: NotifyDeviceChangeArgs;
+}
+
+type CommandMessage = RequestDevicesMessage | NotifyDeviceChangeMessage;
+
 export class WebCamModel extends DOMWidgetModel {
   defaults(): Backbone.ObjectHash {
     return {
@@ -83,12 +115,15 @@ export class WebCamModel extends DOMWidgetModel {
     this.on('change:iceServers', () => {
       this.connect(undefined, true, true);
     });
-    this.on('msg:custom', ({ msg }) => {
-      if (msg === 'ready') {
-        const state = this.getState();
-        if (state === 'new') {
-          this.setState('ready');
-        }
+    this.on('msg:custom', ({ cmd, id, args }: CommandMessage) => {
+      if (id !== this.model_id) {
+        return;
+      }
+      if (cmd === 'request_devices') {
+        const { type } = args;
+        this.send({ ans: cmd, id, res: })
+      } else if (cmd === 'notify_device_change') {
+        const { type, change } = args;
       }
     });
   }
@@ -108,6 +143,38 @@ export class WebCamModel extends DOMWidgetModel {
   pc: RTCPeerConnection | undefined;
   client_stream: MediaStream | undefined;
   server_stream: MediaStream | undefined;
+
+  send_cmd = async (
+    cmd: string,
+    args: Record<string, any>,
+    wait = true
+  ): Promise<any> => {
+    const id = this.model_id;
+    if (wait) {
+      return new Promise((resolve) => {
+        // eslint-disable-next-line @typescript-eslint/no-this-alias
+        const self = this;
+        this.send({ cmd, id, args }, {});
+        function callback({
+          ans,
+          id: t_id,
+          res,
+        }: {
+          ans: string;
+          id: string;
+          res: any;
+        }) {
+          if (ans === cmd && t_id === id) {
+            resolve(res);
+            self.off('msg:custom', callback);
+          }
+        }
+        this.on('msg:custom', callback);
+      });
+    } else {
+      this.send({ cmd, id, args }, {});
+    }
+  };
 
   resetPeer = (): void => {
     this.pc = undefined;
@@ -372,15 +439,9 @@ export class WebCamModel extends DOMWidgetModel {
           // this.syncDevice(track);
           pc.addTrack(track, stream);
         });
-        await negotiate(pc, (offer) => {
+        await negotiate(pc, async (offer) => {
           console.log(offer);
-          return new Promise((resolve) => {
-            this.set('client_desc', offer);
-            this.save_changes();
-            this.on('change:server_desc', () => {
-              resolve(this.get('server_desc'));
-            });
-          });
+          return this.send_cmd('exchange_peer', { desc: offer });
         });
         const pcState = await waitForConnectionState(
           pc,

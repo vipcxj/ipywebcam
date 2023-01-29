@@ -11,9 +11,11 @@ TODO: Add module docstring
 from abc import ABCMeta, abstractmethod
 from os import path
 import asyncio
+from dataclasses import dataclass
+from threading import RLock
 import inspect
 import logging
-from typing import Awaitable, Callable, Generic, Optional, TypeVar, Union
+from typing import Awaitable, Callable, Generic, Optional, TypeVar, Union, Any as AnyType
 from aiortc import RTCConfiguration, RTCIceServer, RTCPeerConnection, RTCSessionDescription
 from aiortc.contrib.media import MediaRelay, MediaStreamTrack
 from av import VideoFrame, AudioFrame
@@ -95,6 +97,167 @@ class AudioTransformTrack(MediaTransformTrack[AudioFrame]):
     def get_transformers(withTransformers: WithMediaTransformers) -> list[MediaTransformer[AudioFrame]]:
         return withTransformers.audio_transformers
 
+
+def transform_devices_to_options(devices): 
+    return [(device['label'] or device['deviceId'], device) for device in devices]
+
+
+def transform_options_to_devices(options):
+    return [device for (_, device) in options if device]
+
+
+def find_device_from_options(options: list[tuple[str, dict]], device_id: str) -> dict | None:
+    for _, device in options:
+        if device.get("deviceId") == device_id:
+            return device
+    return None
+@dataclass
+class State:
+    id: str
+    widget: "WebCamWidget"
+    pc: RTCPeerConnection = None
+    client_desc: RTCSessionDescription = None
+    server_desc: RTCSessionDescription = None
+    lock: RLock = RLock()
+    a_lock: asyncio.Lock = asyncio.Lock()
+    video_input_devices: list[dict] = []
+    video_input_device_id: str | None = None
+    video_input_selector: Dropdown = Dropdown(options=[], value=None, description='Video Input')
+    audio_input_devices: list[dict] = []
+    audio_input_device_id: str | None = None
+    audio_input_selector: Dropdown = Dropdown(options=[], value=None, description='Audio Input')
+    audio_output_devices: list[dict] = []
+    audio_output_device_id: str | None = None
+    audio_output_selector: Dropdown = Dropdown(options=[], value=None, description='Audio Output')
+    
+    def __post_init__(self):
+        def on_display(type: str, *args):
+            self.request_devices(id, type=type)
+        self.video_input_selector.on_displayed(lambda *args: on_display("video_input", *args))
+        self.observe(id, "video_input", lambda change: self.notify_device_change(id, type="video_input", change=change))
+        self.audio_input_selector.on_displayed(lambda *args: on_display("audio_input", *args))
+        self.observe(id, "audio_input", lambda change: self.notify_device_change(id, type="audio_input", change=change))
+        self.audio_output_selector.on_displayed(lambda *args: on_display("audio_output", *args))
+        self.observe(id, "audio_output", lambda change: self.notify_device_change(id, type="audio_output", change=change))
+        
+    
+    def get_device_id(self, type: str) -> str:
+        if type == 'video_input':
+            return self.video_input_device_id
+        elif type == 'audio_input':
+            return self.audio_input_device_id
+        elif type == 'audio_output':
+            return self.audio_output_device_id
+        else:
+            raise RuntimeError(f'Invalid device type {type}')
+        
+    def _set_device_id(self, type: str, id: str):
+        if type == 'video_input':
+            self.video_input_device_id = id
+        elif type == 'audio_input':
+            self.audio_input_device_id = id
+        elif type == 'audio_output':
+            self.audio_output_device_id = id
+        else:
+            raise RuntimeError(f'Invalid device type {type}')
+        
+    def set_device_id(self, type: str, id: str):
+        with self.lock:
+            selector = self.get_device_selector(type=type)
+            device = find_device_from_options(selector.options, id)
+            if selector.value != device:
+                selector.value = device
+        
+    def get_device_selector(self, type: str) -> Dropdown:
+        if type == 'video_input':
+            return self.video_input_selector
+        elif type == 'audio_input':
+            return self.audio_input_selector
+        elif type == 'audio_output':
+            return self.audio_output_selector
+        else:
+            raise RuntimeError(f'Invalid device type {type}')
+        
+        
+    def set_devices(self, type: str, devices: list[dict]):
+        with self.lock:
+            selector = self.get_device_selector(type=type)
+            selector.options = transform_devices_to_options(devices=devices)
+            device_id = self.get_device_id(type)
+            selector.value = None if device_id is None else find_device_from_options(selector.options, device_id)
+            
+            
+    def get_devices(self, type: str):
+        with self.lock:
+            selector = self.get_device_selector(type=type)
+            return transform_options_to_devices(selector.options)
+        
+    def observe(self, id: str, type: str, handler: Callable[[dict], None]):
+        with self.lock:
+            selector = self.get_device_selector(type=type)
+            selector.observe(handler=handler, names="value")
+            
+    def log_info(self, msg: str, *args):
+        logger.info(f"[{self.id}] {msg}", *args)
+            
+    async def exchange_peer(self, client_desc: dict[str, str]):
+        try:
+            with self.a_lock:
+                if self.pc:
+                    self.pc.close()
+                self.client_desc = offer = RTCSessionDescription(**client_desc)
+                self.pc = RTCPeerConnection(RTCConfiguration(self.widget.get_ice_servers()))
+                pc = self.pc
+                @pc.on("icegatheringstatechange")
+                async def on_iceconnectionstatechange():
+                    self.log_info(f"Ice connection state is {pc.iceGatheringState}")
+                
+                @pc.on("iceconnectionstatechange")
+                async def on_iceconnectionstatechange():
+                    self.log_info(f"Ice connection state is {pc.iceConnectionState}")
+                    
+                @pc.on("signalingstatechange")
+                async def on_signalingstatechange():
+                    self.log_info(f"Signaling state is {pc.signalingState}")
+                
+                @pc.on("connectionstatechange")    
+                async def on_connectionstatechange():
+                    self.log_info(f"Connection state is {pc.connectionState}")
+                    if pc.connectionState == "failed":
+                        with self.a_lock:
+                            await pc.close()
+                            self.pc = None
+                    
+                @pc.on("error")
+                async def on_error(error):
+                    logger.exception(error)
+                
+                @pc.on("track")
+                def on_track(track):
+                    self.log_info(f"Track {track.kind} received")
+                    if track.kind == "video":
+                        pc.addTrack(relay.subscribe(VideoTransformTrack(track, self)))
+                    elif track.kind == "audio":
+                        pc.addTrack(relay.subscribe(AudioTransformTrack(track, self)))
+                    
+                # handle offer
+                await pc.setRemoteDescription(offer)
+                # send answer
+                answer = await pc.createAnswer()
+                await pc.setLocalDescription(answer)
+                self.server_desc = pc.localDescription
+                self.widget.answer("exchange_peer", self.id, { "sdp": self.server_desc.sdp, "type": self.server_desc.type })
+        except Exception as e:
+            logger.exception(e)
+            
+    async def close(self):
+        with self.a_lock:
+            if self.pc:
+                await self.pc.close()
+                self.pc = None
+    
+            
+
 class WebCamWidget(DOMWidget, WithMediaTransformers):
     """
     A widget for using web camera. Support processing frame in the backend using python at runtime.
@@ -131,9 +294,7 @@ class WebCamWidget(DOMWidget, WithMediaTransformers):
         allow_none=True
     ).tag(sync=True)
      
-    iceServers = List(Any(), default_value=[]).tag(sync=True)  
-    
-    state = Unicode('closed', read_only=True).tag(sync=True)
+    iceServers = List(Any(), default_value=[]).tag(sync=True)
     
     autoplay = Bool(True, allow_none=True).tag(sync=True)
     
@@ -177,6 +338,8 @@ class WebCamWidget(DOMWidget, WithMediaTransformers):
     
     pc: RTCPeerConnection = None
     state: int = 0
+    state_map: dict[str, State] = {}
+    lock: RLock = RLock()
     
     def __init__(
         self,
@@ -226,176 +389,56 @@ class WebCamWidget(DOMWidget, WithMediaTransformers):
             self.muted = muted
             
             
-    def send_command(self, cmd: str, args: dict, on_result: Callable[[any], None]) -> None:
-        self.send({ "cmd": cmd, "args": args })
-        def callback(_, content) -> None:
-            if isinstance(content, dict) and content.get("ans") == cmd:
-                on_result(content.get("res"))
-                self.on_msg(callback, True)
-        logger.log(f'add command on_result callback: {id(callback)}')
-        self.on_msg(callback)
+    def send_command(self, cmd: str, target_id: str, args: dict, on_result: Callable[[str, AnyType], None] | None) -> None:
+        self.send({ "cmd": cmd, "id": target_id, "args": args })
+        if on_result is not None:
+            def callback(_, content) -> None:
+                if isinstance(content, dict) and content.get("ans") == cmd:
+                    source_id: str = content.get("id")
+                    if not target_id or source_id == target_id:
+                        on_result(source_id, content.get("res"))
+                        self.on_msg(callback, True)
+            logger.log(f'add command on_result callback: {target_id(callback)}')
+            self.on_msg(callback)
         
-    def answer(self, cmd: str, content: dict) -> None:
-        self.send({ "ans": cmd, "res": content })
+    def answer(self, cmd: str, target_id: str, content: AnyType) -> None:
+        self.send({ "ans": cmd, "id": target_id, "res": content })
+        
+    def notify_device_change(self, id: str, type: str, change: dict):
+        state = self.get_or_create_state(id)
+        self.send_command("notify_device_change", id, { "type": type, "change": change })
+        
+        
+    def get_or_create_state(self, id: str) -> State:
+        with self.lock:
+            state = self.state_map.get(id)
+            if state is None:
+                state = State(id=id, widget=self)
+            return state
+        
+    def request_devices(self, id: str, type: str):
+        state = self.get_or_create_state(id)
+        def on_result(id: str, res: AnyType):
+            if not isinstance(res, list):
+                raise RuntimeError(f"The result of request_devices command from {id} should be a list. but got {type(res)}")
+            state.set_devices(type=type, devices=res)
             
-    def get_device_selector(self, type: str) -> Dropdown:
-        if type == 'video_input':
-            return self.video_input_selector
-        elif type == 'audio_input':
-            return self.audio_input_selector
-        elif type == 'audio_output':
-            return self.audio_output_selector
-        else:
-            raise RuntimeError(f'Invalid device type {type}')
+        self.send_command("request_devices", id, { "type": type }, on_result=on_result)
         
-    def is_device_dirty(self, type: str) -> bool:
-        if type == 'video_input':
-            return self.video_input_device_dirty
-        elif type == 'audio_input':
-            return self.audio_input_device_dirty
-        elif type == 'audio_output':
-            return self.audio_output_device_dirty
-        else:
-            raise RuntimeError(f'Invalid device type {type}')
         
-    def set_device_dirty(self, type: str, dirty: bool) -> None:
-        if type == 'video_input':
-            self.video_input_device_dirty = dirty
-        elif type == 'audio_input':
-            self.audio_input_device_dirty = dirty
-        elif type == 'audio_output':
-            self.audio_output_device_dirty = dirty
-        else:
-            raise RuntimeError(f'Invalid device type {type}')
-        
-    def get_device(self, type: str) -> dict:
-        if type == 'video_input':
-            return self.video_input_device
-        elif type == 'audio_input':
-            return self.audio_input_device
-        elif type == 'audio_output':
-            return self.audio_output_device
-        else:
-            raise RuntimeError(f'Invalid device type {type}')
-        
-    def _set_device(self, type: str, device: Optional[dict]) -> None:
-        if type == 'video_input':
-            self.video_input_device = device
-        elif type == 'audio_input':
-            self.audio_input_device = device
-        elif type == 'audio_output':
-            self.audio_output_device = device
-        else:
-            raise RuntimeError(f'Invalid device type {type}')
-            
-        
-    def set_device(self, type: str, device: Optional[dict], dirty: bool = False) -> bool:
-        """set device
-
-        Args:
-            type (str): device type
-            device (Optional[dict]): device info
-            dirty (bool, optional): If true, the device should be sync to selector immediately or later. 
-            If false and current device is dirty, the input device param is ignored and the current device info should be sync to the selector immediately or later. 
-            Defaults to False.
-            
-        Returns:
-            Wether the device is changed.
-
-        Raises:
-            RuntimeError: invalid type value
-        """        
-        selector = self.get_device_selector(type)
-        cur_device = self.get_device(type)
-        if cur_device == device:
-            return False
-        
-        if dirty:
-            self._set_device(type, device)
-            if device and self.is_in_selector(selector, device):
-                selector.value = device
-                self.set_device_dirty(type, False)
-            else:
-                self.set_device_dirty(type, True)
-            return True
-        else:
-            if self.is_device_dirty(type):
-                cur_device = self.get_device(type)
-                if cur_device and cur_device != selector.value and self.is_in_selector(selector, cur_device):
-                    selector.value = cur_device
-                    self.set_device_dirty(type, False)
-                return False
-            else:
-                self._set_device(type, device)
-                return True
-                    
-        
-    def get_device_id(self, device: Optional[dict]) -> Optional[str]:
-        return device['deviceId'] if device is not None else None
-    
-    def is_in_selector(self, selector: Dropdown, device: dict):
-        pass
-            
-    def bind_device_selector(self, type: str):
-        selector = self.get_device_selector(type)
-        selector.on_displayed(lambda w: self.request_devices(type))
-        def handle_device_change(change):
-            old_id = self.get_device_id(self.get_device(type))
-            new_id = self.get_device_id(change.new)
-            if old_id != new_id:
-                if self.set_device(type, change.new):
-                    self.send_device_id(type, new_id)
-        selector.observe(handle_device_change, 'value')
-    
-    def request_devices(self, type: str):
-        self.send({ 'msg': 'request_devices', 'type': type })
-        
-    def send_device_id(self, type: str, device_id: Optional[str]) -> None:
-        self.send({ 'msg': 'send_device_id', 'type': type, 'data': device_id })
-    
-    
-    def handle_answer_request_devices(self, type: str, devices: list):
-        """The answer of 'request_devices'
-
-        Args:
-            type (str): device type
-            devices (list): list of device info
-        """
-        selector = self.get_device_selector(type)
-        selector.options = devices
-        
-    def handle_answer_sync_device(self, type: str, device: Optional[str], req_id: str) -> None:
-        """The client request that the server should use its device info
-
-        Args:
-            type (str): device type
-            device (Optional[str]): device info
-            req_id (str): used to 
-        """
-        self.set_device(type, device, True)
-        
-    def handle_request_device(self, type: str) -> None:
-        """client request the device info stored in the server
-
-        Args:
-            type (str): device type
-        """
-        self.send({ 'msg': 'answer_device', 'type': type, 'device': self.get_device(type) })
+    def answer_exchange_peer(self, id: str, client_desc: dict[str, str]):
+        state = self.get_or_create_state(id)
+        loop.create_task(state.exchange_peer(client_desc=client_desc))
                 
     
     def _handle_custom_msg(self, content, buffers):
         super()._handle_custom_msg(content, buffers)
-        if isinstance(content, dict) and "ans" in content:
-            cmd = content.get("ans")
-            
-        msg = content.get('msg')
-        if msg == 'answer_devices':
-            self.handle_answer_request_devices(content['type'], content['devices'])
-        elif msg == 'sync_device':
-            self.handle_answer_sync_device(content['type'], content['device'])
-        elif msg == 'request_device':
-            self.handle_request_device(content['type'])
-            
+        if isinstance(content, dict) and "cmd" in content and "id" in content and "args" in content:
+            cmd = content.get("cmd")
+            id = content.get("id")
+            args = content.get("args")
+            if cmd == "exchange_peer" and isinstance(args, dict) and "desc" in args:
+                self.answer_exchange_peer(id, args.get("desc"))
         
         
     def add_video_transformer(self, callback: Callable[[VideoFrame, dict], Union[VideoFrame, Awaitable[VideoFrame]]]) -> MediaTransformer[VideoFrame]:
@@ -470,107 +513,8 @@ class WebCamWidget(DOMWidget, WithMediaTransformers):
         else:
             servers.append(RTCIceServer(urls='stun:stun.l.google.com:19302'))
         return servers
-    
-    async def new_pc_connection(self, client_desc: dict[str, str]):
-        logger.debug("new_pc_connection")
-        if self.state >= 0:
-            try:
-                self.state = -1
-                await self.close_pc_connection(self.pc)
-                offer = RTCSessionDescription(**client_desc)
-                self.pc = pc = RTCPeerConnection(RTCConfiguration(self.get_ice_servers()))
-                
-                @pc.on("icegatheringstatechange")
-                async def on_iceconnectionstatechange():
-                    logger.info("Ice connection state is %s", pc.iceGatheringState)
-                
-                @pc.on("iceconnectionstatechange")
-                async def on_iceconnectionstatechange():
-                    logger.info("Ice connection state is %s", pc.iceConnectionState)
-                    
-                @pc.on("signalingstatechange")
-                async def on_signalingstatechange():
-                    logger.info("Signaling state is %s", pc.signalingState)
-                
-                @pc.on("connectionstatechange")    
-                async def on_connectionstatechange():
-                    logger.info("Connection state is %s", pc.connectionState)
-                    if pc.connectionState == "failed":
-                        await self.close_pc_connection(pc)
-                        self.state = 2
-                        
-                @pc.on("error")
-                async def on_error(error):
-                    logger.exception(error)
-                                
-                @pc.on("track")
-                def on_track(track):
-                    logger.info("Track %s received", track.kind)
-                    if track.kind == "video":
-                        pc.addTrack(relay.subscribe(VideoTransformTrack(track, self)))
-                    elif track.kind == "audio":
-                        pc.addTrack(relay.subscribe(AudioTransformTrack(track, self)))
-                        
-                # handle offer
-                await pc.setRemoteDescription(offer)
-                # send answer
-                answer = await pc.createAnswer()
-                await pc.setLocalDescription(answer)
-                # my_sdp = re.sub(r'c=IN IP4 (\d+\.\d+\.\d+\.\d+)', 'c=IN IP4 140.210.206.15', pc.localDescription.sdp)
-                my_sdp = pc.localDescription.sdp
-                self.server_desc = { "sdp": my_sdp, "type": pc.localDescription.type }
-                self.state = 1
-            except Exception as e:
-                logger.exception(e)
-                self.state = 2
-    
-    
-    async def close_pc_connection(self, pc: RTCPeerConnection):
-        if pc:
-            logger.debug("closing pc")
-            await pc.close()
-            logger.debug("closed pc")
-            if self.pc == pc:
-                self.pc = None
-        
-    
-    @observe("client_desc")
-    def on_client_desc_change(self, change):
-        try:
-            logger.debug(f'receive client_desc change from {change.old} to {change.new}')
-            logger.debug(f'loop is running? {loop.is_running()}')
-            loop.create_task(self.new_pc_connection(change.new))
-            logger.debug("on_client_desc_change end")
-        except Exception as e:
-            logger.error(e)
-            
-            
-    def may_send_ready(self) -> None:
-        if (self.video_codecs_ready and self.video_input_devices_ready and self.audio_input_devices_ready and self.audio_output_devices_ready):
-            self.send({ 'msg': 'ready' })
-            
-    
-    @observe("video_input_devices")
-    def on_video_input_devices_change(self, change):
-        self.video_input_devices_ready = True
-        self.may_send_ready()
-        
-    @observe("audio_input_devices")
-    def on_audio_input_devices_change(self, change):
-        self.audio_input_devices_ready = True
-        self.may_send_ready()
-        
-    @observe("audio_output_devices")
-    def on_audio_output_devices_change(self, change):
-        self.audio_output_devices_ready = True
-        self.may_send_ready()
-        
-    @observe("video_codecs")
-    def on_video_codecs_change(self, change):
-        self.video_codecs_ready = True
-        self.may_send_ready()
         
             
     def __del__(self):
-        loop.create_task(self.close_pc_connection(self.pc))
+        loop.create_task(asyncio.gather([state.close() for state in self.state_map.values()]))
         return super().__del__()
