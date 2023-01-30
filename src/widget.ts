@@ -13,7 +13,7 @@ import {
   negotiate,
   waitForConnectionState,
 } from './webrtc';
-import { arrayInclude, arrayFind } from './utils';
+import { arrayInclude } from './utils';
 import { MODULE_NAME, MODULE_VERSION } from './version';
 
 // Import the CSS
@@ -25,8 +25,7 @@ type State =
   | 'connected'
   | 'closed'
   | 'error'
-  | 'new'
-  | 'ready';
+  | 'new';
 
 const supportsSetCodecPreferences: boolean =
   window.RTCRtpTransceiver &&
@@ -64,7 +63,22 @@ interface NotifyDeviceChangeMessage extends BaseCommandMessage {
 
 type CommandMessage = RequestDevicesMessage | NotifyDeviceChangeMessage;
 
+function isRequestDevicesMessage(
+  msg: BaseCommandMessage
+): msg is RequestDevicesMessage {
+  return msg.cmd === 'request_devices';
+}
+
+function isNotifyDeviceChangeMessage(
+  msg: BaseCommandMessage
+): msg is NotifyDeviceChangeMessage {
+  return msg.cmd === 'notify_device_change';
+}
+
 export class WebCamModel extends DOMWidgetModel {
+  videoInput?: string;
+  audioInput?: string;
+
   defaults(): Backbone.ObjectHash {
     return {
       ...super.defaults(),
@@ -78,12 +92,6 @@ export class WebCamModel extends DOMWidgetModel {
       client_desc: null,
       iceServers: [],
       constraints: null,
-      video_input_devices: [],
-      video_input_device: null,
-      audio_input_devices: [],
-      audio_input_device: null,
-      audio_output_devices: [],
-      audio_output_device: null,
       video_codecs: [],
       video_codec: null,
       state: 'new',
@@ -101,32 +109,65 @@ export class WebCamModel extends DOMWidgetModel {
   constructor(...args: any[]) {
     super(...args);
     this.fetchCodecs();
-    this.fetchDevices();
-    this.on('change:video_input_device', (...args) => {
-      console.log('change:video_input_device');
-      console.log(args);
-      this.connect(undefined, true, true);
-    });
-    this.on('change:audio_input_device', (...args) => {
-      console.log('change:audio_input_device');
-      console.log(args);
-      this.connect(undefined, true, true);
-    });
+    // this.fetchDevices();
+    // this.on('change:video_input_device', (...args) => {
+    //   console.log('change:video_input_device');
+    //   console.log(args);
+    //   this.connect(undefined, true, true);
+    // });
+    // this.on('change:audio_input_device', (...args) => {
+    //   console.log('change:audio_input_device');
+    //   console.log(args);
+    //   this.connect(undefined, true, true);
+    // });
     this.on('change:iceServers', () => {
       this.connect(undefined, true, true);
     });
-    this.on('msg:custom', ({ cmd, id, args }: CommandMessage) => {
+    this.on('msg:custom', (cmdMsg: CommandMessage) => {
+      const { id } = cmdMsg;
       if (id !== this.model_id) {
         return;
       }
-      if (cmd === 'request_devices') {
+      if (isRequestDevicesMessage(cmdMsg)) {
+        const { cmd, id, args } = cmdMsg;
         const { type } = args;
-        this.send({ ans: cmd, id, res: })
-      } else if (cmd === 'notify_device_change') {
+        this.getDevice(type).then((devices) => {
+          console.log(devices);
+          this.send({ ans: cmd, id, res: devices }, {});
+        });
+      } else if (isNotifyDeviceChangeMessage(cmdMsg)) {
+        const { args } = cmdMsg;
         const { type, change } = args;
+        if (type === 'video_input') {
+          if (this.videoInput !== change.new) {
+            this.videoInput = change.new;
+            this.connect(undefined, true, true);
+          }
+        } else if (type === 'audio_input') {
+          if (this.audioInput !== change.new) {
+            this.audioInput = change.new;
+            this.connect(undefined, true, true);
+          }
+        }
       }
     });
   }
+
+  getDevice = async (type: DeviceType): Promise<MediaDeviceInfo[]> => {
+    const stream = await navigator.mediaDevices.getUserMedia({
+      video: type === 'video_input',
+      audio: type === 'audio_input' || type === 'audio_output',
+    });
+    try {
+      const n_type = type.replace('_', '');
+      const devices = await navigator.mediaDevices.enumerateDevices();
+      return devices.filter(
+        (device) => device.kind === n_type && device.deviceId
+      );
+    } finally {
+      stream.getTracks().forEach((track) => track.stop());
+    }
+  };
 
   static serializers: ISerializers = {
     ...DOMWidgetModel.serializers,
@@ -216,8 +257,8 @@ export class WebCamModel extends DOMWidgetModel {
     let { video, audio } = (this.get(
       'constraints'
     ) as MediaStreamConstraints) || { audio: false, video: true };
-    const { deviceId: videoId } = this.get('video_input_device') || {};
-    const { deviceId: audioId } = this.get('audio_input_device') || {};
+    const videoId = this.videoInput;
+    const audioId = this.audioInput;
     if (audio && audioId) {
       if (typeof audio === 'boolean') {
         audio = {
@@ -247,9 +288,9 @@ export class WebCamModel extends DOMWidgetModel {
       'new',
       'error'
     );
-    if (state === 'new' || state === 'ready') {
+    if (state === 'new') {
       throw new Error(
-        `This should not happen. We can't close the peer when the state is ${state}. Because at this time, we shouldn't start the peer.`
+        `This should not happen. We can't close the peer when the state is ${state}. Because at this time, we haven't start the peer.`
       );
     }
     if (state === 'closed' || state === 'error') {
@@ -283,40 +324,6 @@ export class WebCamModel extends DOMWidgetModel {
     const codecs = this.getCodecs();
     this.set('video_codecs', codecs);
     this.save_changes();
-  };
-
-  fetchDevices = async (): Promise<void> => {
-    const stream = await navigator.mediaDevices.getUserMedia({
-      video: true,
-      audio: true,
-    });
-    try {
-      const devices = await navigator.mediaDevices.enumerateDevices();
-      const videoInputs = devices.filter(
-        (device) => device.kind === 'videoinput' && device.deviceId
-      );
-      this.set('video_input_devices', videoInputs);
-      if (videoInputs.length > 0) {
-        this.set('video_input_device', videoInputs[0]);
-      }
-      const audioInputs = devices.filter(
-        (device) => device.kind === 'audioinput' && device.deviceId
-      );
-      this.set('audio_input_devices', audioInputs);
-      if (audioInputs.length > 0) {
-        this.set('audio_input_device', audioInputs[0]);
-      }
-      const audioOutputs = devices.filter(
-        (device) => device.kind === 'audiooutput' && device.deviceId
-      );
-      this.set('audio_output_devices', audioOutputs);
-      if (audioOutputs.length > 0) {
-        this.set('audio_output_device', audioOutputs[0]);
-      }
-      this.save_changes();
-    } finally {
-      stream.getTracks().forEach((track) => track.stop());
-    }
   };
 
   getCodecs = (): string[] => {
@@ -354,42 +361,20 @@ export class WebCamModel extends DOMWidgetModel {
   };
 
   syncDevice = (track: MediaStreamTrack): void => {
+    const type: DeviceType =
+      track.kind === 'video' ? 'video_input' : 'audio_input';
     let curDeviceId: string | undefined;
     if (typeof track.getCapabilities !== 'undefined') {
       curDeviceId = track.getCapabilities().deviceId;
     } else {
       curDeviceId = track.getSettings().deviceId;
     }
-    let change = false;
-    if (track.kind === 'video') {
-      const { deviceId } = this.get('video_input_device') || {};
-      if (curDeviceId !== deviceId) {
-        const devices: MediaDeviceInfo[] =
-          this.get('video_input_devices') || [];
-        const device = arrayFind(
-          devices,
-          ({ deviceId }, ignored) => curDeviceId === deviceId
-        );
-        this.set('video_input_device', device || null);
-        change = true;
-      }
+    if (type === 'video_input') {
+      this.videoInput = curDeviceId;
+    } else {
+      this.audioInput = curDeviceId;
     }
-    if (track.kind === 'audio') {
-      const { deviceId } = this.get('audio_input_device') || {};
-      if (curDeviceId !== deviceId) {
-        const devices: MediaDeviceInfo[] =
-          this.get('audio_input_devices') || [];
-        const device = arrayFind(
-          devices,
-          ({ deviceId }, ignored) => curDeviceId === deviceId
-        );
-        this.set('audio_input_device', device || null);
-        change = true;
-      }
-    }
-    if (change) {
-      this.save_changes();
-    }
+    this.send_cmd('sync_device', { type, id: curDeviceId }, false);
   };
 
   connect = async (
@@ -401,9 +386,9 @@ export class WebCamModel extends DOMWidgetModel {
       'closed',
       'connected',
       'error',
-      'ready'
+      'new'
     );
-    if (state === 'closed' || state === 'error' || state === 'ready') {
+    if (state === 'closed' || state === 'error' || state === 'new') {
       if (only_reconnect) {
         return;
       }
@@ -436,7 +421,7 @@ export class WebCamModel extends DOMWidgetModel {
         );
         this.client_stream = stream;
         stream.getTracks().forEach((track) => {
-          // this.syncDevice(track);
+          this.syncDevice(track);
           pc.addTrack(track, stream);
         });
         await negotiate(pc, async (offer) => {

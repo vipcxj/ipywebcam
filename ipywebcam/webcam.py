@@ -11,7 +11,8 @@ TODO: Add module docstring
 from abc import ABCMeta, abstractmethod
 from os import path
 import asyncio
-from dataclasses import dataclass
+from contextlib import contextmanager
+from dataclasses import dataclass, field
 from threading import RLock
 import inspect
 import logging
@@ -20,7 +21,7 @@ from aiortc import RTCConfiguration, RTCIceServer, RTCPeerConnection, RTCSession
 from aiortc.contrib.media import MediaRelay, MediaStreamTrack
 from av import VideoFrame, AudioFrame
 from ipywidgets import DOMWidget, Dropdown
-from traitlets import Any, Bool, Float, List, Unicode, Dict, Enum, observe, link
+from traitlets import Any, Bool, Float, List, Unicode, Dict, Enum, link
 from ._frontend import module_name, module_version
 
 logger = logging.getLogger("ipywebcam")
@@ -57,8 +58,12 @@ class MediaTransformer(Generic[MT]):
 
 
 class WithMediaTransformers:
-    video_transformers: list[MediaTransformer[VideoFrame]] = []
-    audio_transformers: list[MediaTransformer[AudioFrame]] = []
+    video_transformers: list[MediaTransformer[VideoFrame]]
+    audio_transformers: list[MediaTransformer[AudioFrame]]
+    
+    def __init__(self) -> None:
+        self.video_transformers = []
+        self.audio_transformers = []
 
 class MediaTransformTrack(MediaStreamTrack, Generic[MT], metaclass=ABCMeta):
     
@@ -99,7 +104,7 @@ class AudioTransformTrack(MediaTransformTrack[AudioFrame]):
 
 
 def transform_devices_to_options(devices): 
-    return [(device['label'] or device['deviceId'], device) for device in devices]
+    return [(device.get('label') or device.get('deviceId'), device) for device in devices]
 
 
 def transform_options_to_devices(options):
@@ -111,6 +116,15 @@ def find_device_from_options(options: list[tuple[str, dict]], device_id: str) ->
         if device.get("deviceId") == device_id:
             return device
     return None
+
+
+def deviceEquals(dev1: dict | None, dev2: dict | None) -> bool:
+    if dev1 is None:
+        return dev2 is None
+    if dev2 is None:
+        return dev1 is None
+    return dev1.get("deviceId") == dev2.get("deviceId")
+
 @dataclass
 class State:
     id: str
@@ -118,27 +132,43 @@ class State:
     pc: RTCPeerConnection = None
     client_desc: RTCSessionDescription = None
     server_desc: RTCSessionDescription = None
-    lock: RLock = RLock()
-    a_lock: asyncio.Lock = asyncio.Lock()
-    video_input_devices: list[dict] = []
+    lock: RLock = field(default_factory=RLock)
+    a_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    video_input_devices: list[dict] = field(default_factory=list)
+    video_input_devices_busy: bool = False
     video_input_device_id: str | None = None
-    video_input_selector: Dropdown = Dropdown(options=[], value=None, description='Video Input')
-    audio_input_devices: list[dict] = []
+    video_input_selector: Dropdown = field(default_factory=lambda: Dropdown(options=[], value=None, description='Video Input'))
+    audio_input_devices: list[dict] = field(default_factory=list)
+    audio_input_devices_busy: bool = False
     audio_input_device_id: str | None = None
-    audio_input_selector: Dropdown = Dropdown(options=[], value=None, description='Audio Input')
-    audio_output_devices: list[dict] = []
+    audio_input_selector: Dropdown = field(default_factory=lambda: Dropdown(options=[], value=None, description='Audio Input'))
+    audio_output_devices: list[dict] = field(default_factory=list)
+    audio_output_devices_busy: bool = False
     audio_output_device_id: str | None = None
-    audio_output_selector: Dropdown = Dropdown(options=[], value=None, description='Audio Output')
+    audio_output_selector: Dropdown = field(default_factory=lambda: Dropdown(options=[], value=None, description='Audio Output'))
     
     def __post_init__(self):
         def on_display(type: str, *args):
-            self.request_devices(id, type=type)
+            self.widget.request_devices(self.id, type=type)
+        def transform_change(change: dict) -> dict:
+            return {
+                "old": None if change.old is None else change.old["deviceId"],
+                "new": None if change.new is None else change.new["deviceId"],
+            }
+        def create_handler(type: str) -> Callable[[AnyType], None]:
+            def handler(change: AnyType) -> None:
+                if not self.is_devices_busy(type=type):
+                    t_change = transform_change(change)
+                    self._set_device_id(type, t_change["new"])
+                    self.widget.notify_device_change(self.id, type=type, change=t_change)
+            return handler
+                
         self.video_input_selector.on_displayed(lambda *args: on_display("video_input", *args))
-        self.observe(id, "video_input", lambda change: self.notify_device_change(id, type="video_input", change=change))
+        self.observe(id, "video_input", create_handler("video_input"))
         self.audio_input_selector.on_displayed(lambda *args: on_display("audio_input", *args))
-        self.observe(id, "audio_input", lambda change: self.notify_device_change(id, type="audio_input", change=change))
+        self.observe(id, "audio_input", create_handler("audio_input"))
         self.audio_output_selector.on_displayed(lambda *args: on_display("audio_output", *args))
-        self.observe(id, "audio_output", lambda change: self.notify_device_change(id, type="audio_output", change=change))
+        self.observe(id, "audio_output", create_handler("audio_output"))
         
     
     def get_device_id(self, type: str) -> str:
@@ -163,8 +193,10 @@ class State:
         
     def set_device_id(self, type: str, id: str):
         with self.lock:
+            self._set_device_id(type=type, id=id)
             selector = self.get_device_selector(type=type)
             device = find_device_from_options(selector.options, id)
+            self.log_info(f'found device: {device} from options by id: {id} and type: {type}')
             if selector.value != device:
                 selector.value = device
         
@@ -178,13 +210,68 @@ class State:
         else:
             raise RuntimeError(f'Invalid device type {type}')
         
+    @contextmanager
+    def hold_devices(self, type: str):
+        try:
+            if type == 'video_input':
+                self.video_input_selector.disabled = True
+                self.video_input_devices_busy = True
+            elif type == 'audio_input':
+                self.audio_input_selector.disabled = True
+                self.audio_input_devices_busy = True
+            elif type == 'audio_output':
+                self.audio_output_selector.disabled = True
+                self.audio_output_devices_busy = True
+            else:
+                raise RuntimeError(f'Invalid device type {type}')
+            yield
+        finally:
+            if type == 'video_input':
+                self.video_input_devices_busy = False
+                self.video_input_selector.disabled = False
+            elif type == 'audio_input':
+                self.audio_input_devices_busy = False
+                self.audio_input_selector.disabled = False
+            elif type == 'audio_output':
+                self.audio_output_devices_busy = False
+                self.audio_output_selector.disabled = False
+            else:
+                raise RuntimeError(f'Invalid device type {type}')
+            
+            
+    def is_devices_busy(self, type: str):
+        if type == 'video_input':
+            return self.video_input_devices_busy
+        elif type == 'audio_input':
+            return self.audio_input_devices_busy
+        elif type == 'audio_output':
+            return self.audio_output_devices_busy
+        else:
+            raise RuntimeError(f'Invalid device type {type}')
+        
         
     def set_devices(self, type: str, devices: list[dict]):
         with self.lock:
-            selector = self.get_device_selector(type=type)
-            selector.options = transform_devices_to_options(devices=devices)
-            device_id = self.get_device_id(type)
-            selector.value = None if device_id is None else find_device_from_options(selector.options, device_id)
+            try:
+                selector = self.get_device_selector(type=type)
+                options = transform_devices_to_options(devices=devices)
+                device_id = self.get_device_id(type)
+                old_value = selector.value
+                new_value = None if device_id is None else find_device_from_options(options, device_id)
+                with self.hold_devices(type):
+                    selector.options = options
+                    selector.value = new_value
+                if not deviceEquals(old_value, new_value):
+                    self.widget.notify_device_change(
+                        self.id,
+                        type=type,
+                        change={
+                            "old": None if old_value is None else old_value["deviceId"],
+                            "new": None if new_value is None else new_value["deviceId"],
+                        },
+                    )
+            except Exception as e:
+                logger.exception(e)
             
             
     def get_devices(self, type: str):
@@ -202,7 +289,7 @@ class State:
             
     async def exchange_peer(self, client_desc: dict[str, str]):
         try:
-            with self.a_lock:
+            async with self.a_lock:
                 if self.pc:
                     self.pc.close()
                 self.client_desc = offer = RTCSessionDescription(**client_desc)
@@ -224,7 +311,7 @@ class State:
                 async def on_connectionstatechange():
                     self.log_info(f"Connection state is {pc.connectionState}")
                     if pc.connectionState == "failed":
-                        with self.a_lock:
+                        async with self.a_lock:
                             await pc.close()
                             self.pc = None
                     
@@ -236,9 +323,9 @@ class State:
                 def on_track(track):
                     self.log_info(f"Track {track.kind} received")
                     if track.kind == "video":
-                        pc.addTrack(relay.subscribe(VideoTransformTrack(track, self)))
+                        pc.addTrack(relay.subscribe(VideoTransformTrack(track, self.widget)))
                     elif track.kind == "audio":
-                        pc.addTrack(relay.subscribe(AudioTransformTrack(track, self)))
+                        pc.addTrack(relay.subscribe(AudioTransformTrack(track, self.widget)))
                     
                 # handle offer
                 await pc.setRemoteDescription(offer)
@@ -251,7 +338,7 @@ class State:
             logger.exception(e)
             
     async def close(self):
-        with self.a_lock:
+        async with self.a_lock:
             if self.pc:
                 await self.pc.close()
                 self.pc = None
@@ -279,20 +366,6 @@ class WebCamWidget(DOMWidget, WithMediaTransformers):
     _view_name = Unicode('WebCamView').tag(sync=True)
     _view_module = Unicode(module_name).tag(sync=True)
     _view_module_version = Unicode(module_version).tag(sync=True)
-    
-    client_desc = Dict(
-        key_trait=Enum(set(["sdp", "type"])),
-        per_key_traits={"sdp": Unicode(), "type": Enum(set(["offer", "pranswer", "answer", "rollback"]))},
-        default_value=None,
-        allow_none=True
-    ).tag(sync=True)
-    
-    server_desc = Dict(
-        key_trait=Enum(set(["sdp", "type"])),
-        per_key_traits={"sdp": Unicode(), "type": Enum(set(["offer", "pranswer", "answer", "rollback"]))},
-        default_value=None,
-        allow_none=True
-    ).tag(sync=True)
      
     iceServers = List(Any(), default_value=[]).tag(sync=True)
     
@@ -312,34 +385,12 @@ class WebCamWidget(DOMWidget, WithMediaTransformers):
     
     constraints = Dict(default_value=None, allow_none=True).tag(sync=True)
     
-    video_input_devices = List(Dict(), default_value=[]).tag(sync=True)
-    audio_input_devices = List(Dict(), default_value=[]).tag(sync=True)
-    audio_output_devices = List(Dict(), default_value=[]).tag(sync=True)
-    
-    video_input_devices_ready: bool = False
-    audio_input_devices_ready: bool = False
-    audio_output_devices_ready: bool = False
-    
-    video_input_device = Dict(default_value=None, allow_none=True).tag(sync=True)
-    video_input_device_dirty = False
-    audio_input_device = Dict(default_value=None, allow_none=True).tag(sync=True)
-    audio_input_device_dirty = False
-    audio_output_device = Dict(default_value=None, allow_none=True).tag(sync=True)
-    audio_output_device_dirty = False
-    
-    video_input_selector = Dropdown(options=[], value=None, description='Video input device')
-    audio_input_selector = Dropdown(options=[], value=None, description='Audio input device')
-    audio_output_selector = Dropdown(options=[], value=None, description='Audio output device')
-    
     video_codecs = List(Unicode(), default_value=[]).tag(sync=True)
     video_codec = Unicode(default_value=None, allow_none=True).tag(sync=True)
     video_codec_selector = Dropdown(options=[], value=None, description='Video codec')
-    video_codecs_ready = False
     
-    pc: RTCPeerConnection = None
-    state: int = 0
-    state_map: dict[str, State] = {}
-    lock: RLock = RLock()
+    state_map: dict[str, State]
+    lock: RLock
     
     def __init__(
         self,
@@ -355,18 +406,8 @@ class WebCamWidget(DOMWidget, WithMediaTransformers):
         **kwargs
     ):
         super().__init__(**kwargs)
-        def transform_devices_to_options(devices): 
-            return [(device['label'] or device['deviceId'], device) for device in devices]
-        def transform_options_to_devices(options):
-            return [device for (_, device) in options if device]
-        self.on_displayed(lambda w: print(type(w)))
-
-        link((self.video_input_selector, "options"), (self, "video_input_devices"), transform=(transform_options_to_devices, transform_devices_to_options))
-        link((self.video_input_selector, "value"), (self, "video_input_device"))
-        link((self.audio_input_selector, "options"), (self, "audio_input_devices"), transform=(transform_options_to_devices, transform_devices_to_options))
-        link((self.audio_input_selector, "value"), (self, "audio_input_device"))
-        link((self.audio_output_selector, "options"), (self, "audio_output_devices"), transform=(transform_options_to_devices, transform_devices_to_options))
-        link((self.audio_output_selector, "value"), (self, "audio_output_device"))
+        self.state_map = {}
+        self.lock = RLock()
         link((self.video_codec_selector, 'options'), (self, 'video_codecs'))
         link((self.video_codec_selector, 'value'), (self, 'video_codec'))
         if iceServers is not None:
@@ -392,13 +433,12 @@ class WebCamWidget(DOMWidget, WithMediaTransformers):
     def send_command(self, cmd: str, target_id: str, args: dict, on_result: Callable[[str, AnyType], None] | None) -> None:
         self.send({ "cmd": cmd, "id": target_id, "args": args })
         if on_result is not None:
-            def callback(_, content) -> None:
+            def callback(widget, content, buffers) -> None:
                 if isinstance(content, dict) and content.get("ans") == cmd:
                     source_id: str = content.get("id")
                     if not target_id or source_id == target_id:
                         on_result(source_id, content.get("res"))
                         self.on_msg(callback, True)
-            logger.log(f'add command on_result callback: {target_id(callback)}')
             self.on_msg(callback)
         
     def answer(self, cmd: str, target_id: str, content: AnyType) -> None:
@@ -406,7 +446,7 @@ class WebCamWidget(DOMWidget, WithMediaTransformers):
         
     def notify_device_change(self, id: str, type: str, change: dict):
         state = self.get_or_create_state(id)
-        self.send_command("notify_device_change", id, { "type": type, "change": change })
+        self.send_command("notify_device_change", id, { "type": type, "change": change }, on_result=None)
         
         
     def get_or_create_state(self, id: str) -> State:
@@ -414,7 +454,38 @@ class WebCamWidget(DOMWidget, WithMediaTransformers):
             state = self.state_map.get(id)
             if state is None:
                 state = State(id=id, widget=self)
+                self.state_map[id] = state
             return state
+        
+    def get_current_state(self, create=True) -> State:
+        if create:
+            return self.get_or_create_state(self.model_id)
+        else:
+            return self.state_map.get(self.model_id)
+    
+    @property
+    def video_input_selector(self) -> Dropdown:
+        return self.get_current_state().video_input_selector
+    
+    @property
+    def video_input_device_id(self) -> str | None:
+        return self.get_current_state().video_input_device_id
+    
+    @property
+    def audio_input_selector(self) -> Dropdown:
+        return self.get_current_state().audio_input_selector
+    
+    @property
+    def audio_input_device_id(self) -> str | None:
+        return self.get_current_state().audio_input_device_id
+    
+    @property
+    def audio_output_selector(self) -> Dropdown:
+        return self.get_current_state().audio_output_selector
+    
+    @property
+    def audio_output_device_id(self) -> str | None:
+        return self.get_current_state().audio_output_device_id
         
     def request_devices(self, id: str, type: str):
         state = self.get_or_create_state(id)
@@ -430,6 +501,9 @@ class WebCamWidget(DOMWidget, WithMediaTransformers):
         state = self.get_or_create_state(id)
         loop.create_task(state.exchange_peer(client_desc=client_desc))
                 
+    def answer_sync_device(self, id: str, type: str, device_id: str):
+        state = self.get_or_create_state(id)
+        state.set_device_id(type=type, id=device_id)
     
     def _handle_custom_msg(self, content, buffers):
         super()._handle_custom_msg(content, buffers)
@@ -439,6 +513,10 @@ class WebCamWidget(DOMWidget, WithMediaTransformers):
             args = content.get("args")
             if cmd == "exchange_peer" and isinstance(args, dict) and "desc" in args:
                 self.answer_exchange_peer(id, args.get("desc"))
+            elif cmd == "sync_device" and isinstance(args, dict) and "type" in args and "id" in args:
+                self.answer_sync_device(id, type=args["type"], device_id=args["id"])
+            else:
+                logger.info(f'Unhandled custom message: {content}')
         
         
     def add_video_transformer(self, callback: Callable[[VideoFrame, dict], Union[VideoFrame, Awaitable[VideoFrame]]]) -> MediaTransformer[VideoFrame]:
