@@ -16,10 +16,11 @@ from dataclasses import dataclass, field
 from threading import RLock
 import inspect
 import logging
-from typing import Awaitable, Callable, Generic, Optional, TypeVar, Union, Any as AnyType
+import uuid
+from typing import Awaitable, Callable, Generic, Optional, TypeVar, Union, IO, Any as AnyType
 from aiortc import RTCConfiguration, RTCIceServer, RTCPeerConnection, RTCSessionDescription
-from aiortc.contrib.media import MediaRelay, MediaStreamTrack
-from av import VideoFrame, AudioFrame
+from aiortc.contrib.media import MediaRelay, MediaStreamTrack, MediaRecorder
+from av import VideoFrame, AudioFrame, open as av_open
 from ipywidgets import DOMWidget, Dropdown
 from traitlets import Any, Bool, Float, List, Unicode, Dict, Enum, link
 from ._frontend import module_name, module_version
@@ -45,25 +46,43 @@ relay = MediaRelay()
 
 MT = TypeVar('MT', VideoFrame, AudioFrame)
 class MediaTransformer(Generic[MT]):
-    def __init__(self, callback: Callable[[MT, dict], Union[MT, Awaitable[MT]]], context: dict = {}) -> None:
+    def __init__(self, callback: Callable[[MT, dict, MediaStreamTrack], Union[MT, Awaitable[MT]]], context: dict = {}) -> None:
         self.callback = callback
         self.context = context
+        self.iscoroutinefunction = inspect.iscoroutinefunction(self.callback)
+        sig = inspect.signature(self.callback)
+        self.require_ctx =  len(sig.parameters) > 1
+        self.require_track = len(sig.parameters) > 2
         
-    async def transform(self, frame: MT) -> MT:
-        if inspect.iscoroutinefunction(self.callback):
-            frame = await self.callback(frame, self.context)
+    async def transform(self, frame: MT, track: MediaStreamTrack=None) -> MT | None:
+        if self.iscoroutinefunction:
+            if self.require_ctx and self.require_track:
+                frame = await self.callback(frame, self.context, track)
+            elif self.require_ctx:
+                frame = await self.callback(frame, self.context)
+            else:
+                frame = await self.callback(frame)
         else:
-            frame = self.callback(frame, self.context)
+            if self.require_ctx and self.require_track:
+                frame = self.callback(frame, self.context, track)
+            elif self.require_ctx:
+                frame = self.callback(frame, self.context)
+            else:
+                frame = self.callback(frame)
         return frame
 
 
 class WithMediaTransformers:
     video_transformers: list[MediaTransformer[VideoFrame]]
+    video_posters: list[MediaTransformer[VideoFrame]]
     audio_transformers: list[MediaTransformer[AudioFrame]]
+    audio_posters: list[MediaTransformer[AudioFrame]]
     
     def __init__(self) -> None:
         self.video_transformers = []
+        self.video_posters = []
         self.audio_transformers = []
+        self.audio_posters = []
 
 class MediaTransformTrack(MediaStreamTrack, Generic[MT], metaclass=ABCMeta):
     
@@ -74,19 +93,35 @@ class MediaTransformTrack(MediaStreamTrack, Generic[MT], metaclass=ABCMeta):
         
     async def recv(self) -> MT:
         frame: MT = await self.track.recv()
+        org_frame = frame
         try:
             for transformer in self.__class__.get_transformers(self.withTransformers):
-                frame = await transformer.transform(frame)
+                transformer.context["_org_frame_"] = org_frame
+                out_frame = await transformer.transform(frame=frame, track=self.track)
+                frame = out_frame if out_frame is not None else frame
+                
+            if org_frame is not None and frame is not None:
+                if hasattr(org_frame, "pts") and hasattr(frame, "pts") and frame.pts is None:
+                    frame.pts = org_frame.pts
+                if hasattr(org_frame, "time_base") and hasattr(frame, "time_base") and frame.time_base is None:
+                    frame.time_base = org_frame.time_base
+                    
+            for poster in self.__class__.get_posters(self.withTransformers):
+                poster.context["_org_frame_"] = org_frame
+                await poster.transform(frame=frame, track=self.track)
             return frame
         except Exception as e:
             logger.exception(e)
-            
     
     @staticmethod        
     @abstractmethod
     def get_transformers(withTransformers: WithMediaTransformers) -> list[MediaTransformer[MT]]:
         pass
-            
+    
+    @staticmethod
+    @abstractmethod
+    def get_posters(withTransformers: WithMediaTransformers) -> list[MediaTransformer[MT]]:
+        pass            
             
 class VideoTransformTrack(MediaTransformTrack[VideoFrame]):
     kind = 'video'
@@ -95,12 +130,20 @@ class VideoTransformTrack(MediaTransformTrack[VideoFrame]):
     def get_transformers(withTransformers: WithMediaTransformers) -> list[MediaTransformer[VideoFrame]]:
         return withTransformers.video_transformers
     
+    @staticmethod
+    def get_posters(withTransformers: WithMediaTransformers) -> list[MediaTransformer[MT]]:
+        return withTransformers.video_posters
+    
 class AudioTransformTrack(MediaTransformTrack[AudioFrame]):
     kind = 'audio'
     
     @staticmethod
     def get_transformers(withTransformers: WithMediaTransformers) -> list[MediaTransformer[AudioFrame]]:
         return withTransformers.audio_transformers
+    
+    @staticmethod
+    def get_posters(withTransformers: WithMediaTransformers) -> list[MediaTransformer[MT]]:
+        return withTransformers.audio_posters
 
 
 def transform_devices_to_options(devices): 
@@ -126,6 +169,15 @@ def deviceEquals(dev1: dict | None, dev2: dict | None) -> bool:
     return dev1.get("deviceId") == dev2.get("deviceId")
 
 @dataclass
+class TrackMap:
+    video: list[MediaStreamTrack] = field(default_factory=list)
+    audio: list[MediaStreamTrack] = field(default_factory=list)
+    
+    def clear(self) -> None:
+        self.video = []
+        self.audio = []
+
+@dataclass
 class State:
     id: str
     widget: "WebCamWidget"
@@ -137,19 +189,22 @@ class State:
     video_input_devices: list[dict] = field(default_factory=list)
     video_input_devices_busy: bool = False
     video_input_device_id: str | None = None
-    video_input_selector: Dropdown = field(default_factory=lambda: Dropdown(options=[], value=None, description='Video Input'))
+    video_input_selector: Dropdown = field(default_factory=lambda: Dropdown(options=[], value=None, description='Video Input', _view_count=0))
     audio_input_devices: list[dict] = field(default_factory=list)
     audio_input_devices_busy: bool = False
     audio_input_device_id: str | None = None
-    audio_input_selector: Dropdown = field(default_factory=lambda: Dropdown(options=[], value=None, description='Audio Input'))
+    audio_input_selector: Dropdown = field(default_factory=lambda: Dropdown(options=[], value=None, description='Audio Input', _view_count=0))
     audio_output_devices: list[dict] = field(default_factory=list)
     audio_output_devices_busy: bool = False
     audio_output_device_id: str | None = None
-    audio_output_selector: Dropdown = field(default_factory=lambda: Dropdown(options=[], value=None, description='Audio Output'))
+    audio_output_selector: Dropdown = field(default_factory=lambda: Dropdown(options=[], value=None, description='Audio Output', _view_count=0))
+    track_map: TrackMap = field(default_factory=TrackMap)
     
     def __post_init__(self):
-        def on_display(type: str, *args):
-            self.widget.request_devices(self.id, type=type)
+        def on_view_count_change(type: str, old_count, new_count):
+            self.log_info(f"view count change from {old_count} to {new_count}")
+            if old_count == 0 and new_count > 0:
+                self.widget.request_devices(self.id, type=type)
         def transform_change(change: dict) -> dict:
             return {
                 "old": None if change.old is None else change.old["deviceId"],
@@ -162,12 +217,12 @@ class State:
                     self._set_device_id(type, t_change["new"])
                     self.widget.notify_device_change(self.id, type=type, change=t_change)
             return handler
-                
-        self.video_input_selector.on_displayed(lambda *args: on_display("video_input", *args))
+        
+        self.video_input_selector.observe(lambda change: on_view_count_change("video_input", change.old, change.new), "_view_count")
         self.observe(id, "video_input", create_handler("video_input"))
-        self.audio_input_selector.on_displayed(lambda *args: on_display("audio_input", *args))
+        self.audio_input_selector.observe(lambda change: on_view_count_change("audio_input", change.old, change.new), "_view_count")
         self.observe(id, "audio_input", create_handler("audio_input"))
-        self.audio_output_selector.on_displayed(lambda *args: on_display("audio_output", *args))
+        self.audio_output_selector.observe(lambda change: on_view_count_change("audio_output", change.old, change.new), "_view_count")
         self.observe(id, "audio_output", create_handler("audio_output"))
         
     
@@ -210,36 +265,7 @@ class State:
         else:
             raise RuntimeError(f'Invalid device type {type}')
         
-    @contextmanager
-    def hold_devices(self, type: str):
-        try:
-            if type == 'video_input':
-                self.video_input_selector.disabled = True
-                self.video_input_devices_busy = True
-            elif type == 'audio_input':
-                self.audio_input_selector.disabled = True
-                self.audio_input_devices_busy = True
-            elif type == 'audio_output':
-                self.audio_output_selector.disabled = True
-                self.audio_output_devices_busy = True
-            else:
-                raise RuntimeError(f'Invalid device type {type}')
-            yield
-        finally:
-            if type == 'video_input':
-                self.video_input_devices_busy = False
-                self.video_input_selector.disabled = False
-            elif type == 'audio_input':
-                self.audio_input_devices_busy = False
-                self.audio_input_selector.disabled = False
-            elif type == 'audio_output':
-                self.audio_output_devices_busy = False
-                self.audio_output_selector.disabled = False
-            else:
-                raise RuntimeError(f'Invalid device type {type}')
-            
-            
-    def is_devices_busy(self, type: str):
+    def is_devices_busy(self, type: str) -> bool:
         if type == 'video_input':
             return self.video_input_devices_busy
         elif type == 'audio_input':
@@ -248,6 +274,39 @@ class State:
             return self.audio_output_devices_busy
         else:
             raise RuntimeError(f'Invalid device type {type}')
+        
+    def set_devices_busy(self, type: str, busy: bool) -> None:
+        if type == 'video_input':
+            if busy:
+                self.video_input_selector.disabled = True
+            self.video_input_devices_busy = busy
+            if not busy:
+                self.video_input_selector.disabled = False
+        elif type == 'audio_input':
+            if busy:
+                self.audio_input_selector.disabled = True
+            self.audio_input_devices_busy = busy
+            if not busy:
+                self.audio_input_selector.disabled = False
+        elif type == 'audio_output':
+            if busy:
+                self.audio_output_selector.disabled = True
+            self.audio_output_devices_busy = busy
+            if not busy:
+                self.audio_output_selector.disabled = False
+        else:
+            raise RuntimeError(f'Invalid device type {type}')
+        
+    @contextmanager
+    def hold_devices(self, type: str):
+        if self.is_devices_busy(type=type):
+            yield
+        else:
+            try:
+                self.set_devices_busy(type=type, busy=True)
+                yield
+            finally:
+                self.set_devices_busy(type=type, busy=False)
         
         
     def set_devices(self, type: str, devices: list[dict]):
@@ -291,29 +350,33 @@ class State:
         try:
             async with self.a_lock:
                 if self.pc:
-                    self.pc.close()
+                    await self.pc.close()
+                    self.pc = None
+                    self.track_map.clear()
                 self.client_desc = offer = RTCSessionDescription(**client_desc)
                 self.pc = RTCPeerConnection(RTCConfiguration(self.widget.get_ice_servers()))
+                id = uuid.uuid4().hex
                 pc = self.pc
                 @pc.on("icegatheringstatechange")
                 async def on_iceconnectionstatechange():
-                    self.log_info(f"Ice connection state is {pc.iceGatheringState}")
+                    self.log_info(f"[{id}] Ice connection state is {pc.iceGatheringState}")
                 
                 @pc.on("iceconnectionstatechange")
                 async def on_iceconnectionstatechange():
-                    self.log_info(f"Ice connection state is {pc.iceConnectionState}")
+                    self.log_info(f"[{id}] Ice connection state is {pc.iceConnectionState}")
                     
                 @pc.on("signalingstatechange")
                 async def on_signalingstatechange():
-                    self.log_info(f"Signaling state is {pc.signalingState}")
+                    self.log_info(f"[{id}] Signaling state is {pc.signalingState}")
                 
                 @pc.on("connectionstatechange")    
                 async def on_connectionstatechange():
-                    self.log_info(f"Connection state is {pc.connectionState}")
+                    self.log_info(f"[{id}] Connection state is {pc.connectionState}")
                     if pc.connectionState == "failed":
                         async with self.a_lock:
                             await pc.close()
                             self.pc = None
+                            self.track_map.clear()
                     
                 @pc.on("error")
                 async def on_error(error):
@@ -321,11 +384,14 @@ class State:
                 
                 @pc.on("track")
                 def on_track(track):
-                    self.log_info(f"Track {track.kind} received")
+                    self.log_info(f"[{id}] Track {track.kind} received")
                     if track.kind == "video":
                         pc.addTrack(relay.subscribe(VideoTransformTrack(track, self.widget)))
                     elif track.kind == "audio":
                         pc.addTrack(relay.subscribe(AudioTransformTrack(track, self.widget)))
+                    with self.widget.lock:
+                        asyncio.gather(*[callback(track, pc) for callback in self.widget.track_callbacks])
+                        self.track_map.video.append(track)
                     
                 # handle offer
                 await pc.setRemoteDescription(offer)
@@ -342,8 +408,9 @@ class State:
             if self.pc:
                 await self.pc.close()
                 self.pc = None
-    
-            
+                self.track_map.clear()
+
+OnTrackCallback = Callable[[MediaStreamTrack, RTCPeerConnection], Awaitable[None]] 
 
 class WebCamWidget(DOMWidget, WithMediaTransformers):
     """
@@ -391,6 +458,7 @@ class WebCamWidget(DOMWidget, WithMediaTransformers):
     
     state_map: dict[str, State]
     lock: RLock
+    track_callbacks: list[OnTrackCallback]
     
     def __init__(
         self,
@@ -408,6 +476,7 @@ class WebCamWidget(DOMWidget, WithMediaTransformers):
         super().__init__(**kwargs)
         self.state_map = {}
         self.lock = RLock()
+        self.track_callbacks = []
         link((self.video_codec_selector, 'options'), (self, 'video_codecs'))
         link((self.video_codec_selector, 'value'), (self, 'video_codec'))
         if iceServers is not None:
@@ -519,12 +588,13 @@ class WebCamWidget(DOMWidget, WithMediaTransformers):
                 logger.info(f'Unhandled custom message: {content}')
         
         
-    def add_video_transformer(self, callback: Callable[[VideoFrame, dict], Union[VideoFrame, Awaitable[VideoFrame]]]) -> MediaTransformer[VideoFrame]:
+    def add_video_transformer(self, callback: Callable[[VideoFrame, dict, MediaStreamTrack], Union[VideoFrame | None, Awaitable[VideoFrame | None]]]) -> MediaTransformer[VideoFrame]:
         """Add a video frame processor
 
         Args:
-            callback (Callable[[VideoFrame, dict], Union[VideoFrame, Awaitable[VideoFrame]]]): 
-            a callback accept the frame and a context dict, and then return a processed frame. Support sync and async function
+            callback (Callable[[VideoFrame, dict], Union[VideoFrame, Awaitable[VideoFrame]] | None]): 
+            a callback accept the frame and a context dict, and then return a processed frame. Support sync and async function.
+            The context dict contains key "_org_frame_" at least. It represent the original frame. The users can add their own data to the context dict.
 
         Returns:
             MediaTransformer[VideoFrame]: A transformer instance which can be used to remove the callback by calling remove_video_transformer
@@ -546,7 +616,35 @@ class WebCamWidget(DOMWidget, WithMediaTransformers):
         new_transformers.remove(transformer)
         self.video_transformers = new_transformers
         
-    def add_audio_transformer(self, callback: Callable[[AudioFrame, dict], Union[AudioFrame, Awaitable[AudioFrame]]]) -> MediaTransformer[AudioFrame]:
+    def add_video_poster(self, callback: Callable[[VideoFrame, dict, MediaStreamTrack], None]) -> MediaTransformer[VideoFrame]:
+        """Add a video frame post processor
+
+        Args:
+            callback (Callable[[VideoFrame, dict], None]): 
+            a callback accept the frame and a context dict, Should not return anything. Support sync and async function.
+            The context dict contains key "_org_frame_" at least. It represent the original frame. The users can add their own data to the context dict.
+
+        Returns:
+            MediaTransformer[VideoFrame]: A poster instance which can be used to remove the callback by calling remove_video_poster
+        """        
+        new_posters = self.video_posters.copy()
+        poster = MediaTransformer(callback)
+        new_posters.append(poster)
+        self.video_posters = new_posters
+        return poster
+    
+    
+    def remove_video_poster(self, poster: MediaTransformer[VideoFrame]) -> None:
+        """Remove the video frame post processor
+
+        Args:
+            poster (MediaTransformer[VideoFrame]): The poster instance return by add_video_poster
+        """        
+        new_posters = self.video_posters.copy()
+        new_posters.remove(poster)
+        self.video_posters = new_posters
+        
+    def add_audio_transformer(self, callback: Callable[[AudioFrame, dict, MediaStreamTrack], Union[AudioFrame, Awaitable[AudioFrame]]]) -> MediaTransformer[AudioFrame]:
         """Add a audio frame processor
 
         Args:
@@ -573,6 +671,52 @@ class WebCamWidget(DOMWidget, WithMediaTransformers):
         new_transformers.remove(transformer)
         self.audio_transformers = new_transformers
         
+    def add_audio_poster(self, callback: Callable[[AudioFrame, dict, MediaStreamTrack], None]) -> MediaTransformer[AudioFrame]:
+        """Add a audio frame post processor
+
+        Args:
+            callback (Callable[[AudioFrame, dict], None]): 
+            a callback accept the frame and a context dict, Should not return anything. Support sync and async function.
+            The context dict contains key "_org_frame_" at least. It represent the original frame. The users can add their own data to the context dict.
+
+        Returns:
+            MediaTransformer[AudioFrame]: A poster instance which can be used to remove the callback by calling remove_video_poster
+        """        
+        new_posters = self.audio_posters.copy()
+        poster = MediaTransformer(callback)
+        new_posters.append(poster)
+        self.audio_posters = new_posters
+        return poster
+    
+    
+    def remove_audio_poster(self, poster: MediaTransformer[AudioFrame]) -> None:
+        """Remove the audio frame post processor
+
+        Args:
+            poster (MediaTransformer[AudioFrame]): The poster instance return by add_audio_poster
+        """        
+        new_posters = self.audio_posters.copy()
+        new_posters.remove(poster)
+        self.audio_posters = new_posters
+        
+        
+    def add_track_callback(self, callback: OnTrackCallback) -> None:
+        with self.lock:
+            for state in self.state_map.values():
+                pc = state.pc
+                tracks: list[MediaStreamTrack] = []
+                for track in state.track_map.video:
+                    tracks.append(track)
+                for track in state.track_map.audio:
+                    tracks.append(track)
+                asyncio.gather(*[callback(track, pc) for track in tracks])
+            self.track_callbacks.append(callback)
+        
+        
+    def remove_track_callback(self, callback: OnTrackCallback) -> None:
+        with self.lock:
+            self.track_callbacks.remove(callback)
+        
     
     def get_ice_servers(self) -> list[RTCIceServer]:
         servers: list[RTCIceServer] = []
@@ -591,8 +735,101 @@ class WebCamWidget(DOMWidget, WithMediaTransformers):
         else:
             servers.append(RTCIceServer(urls='stun:stun.l.google.com:19302'))
         return servers
-        
+    
+    def close_peers(self):
+        asyncio.gather(*[state.close() for state in self.state_map.values()])
             
     def __del__(self):
-        loop.create_task(asyncio.gather([state.close() for state in self.state_map.values()]))
+        self.close_peers()
         return super().__del__()
+    
+class RecorderContext:
+    def __init__(self, stream):
+        self.started = False
+        self.stream = stream
+
+class WebCamRecorder:
+    post: bool
+    def __init__(self, widget: WebCamWidget, file: str | IO, post: bool=True, format: str=None, options:dict={}, **kargs) -> None:
+        self.widget = widget
+        self.post = post
+        self.__container = av_open(file=file, format=format, mode="w", options=options)
+        self.__tracks = {}
+        self.recording = False
+        self.video_poster = MediaTransformer[VideoFrame]
+        self.audio_poster = MediaTransformer[AudioFrame]
+        self.lock = asyncio.Lock()
+        self.widget.add_track_callback(self.on_add_track)
+        
+    def addTrack(self, track: MediaStreamTrack):
+        """
+        Add a track to be recorded.
+
+        :param track: A :class:`aiortc.MediaStreamTrack`.
+        """
+        if track.kind == "audio":
+            if self.__container.format.name in ("wav", "alsa"):
+                codec_name = "pcm_s16le"
+            elif self.__container.format.name == "mp3":
+                codec_name = "mp3"
+            else:
+                codec_name = "aac"
+            stream = self.__container.add_stream(codec_name)
+        else:
+            if self.__container.format.name == "image2":
+                stream = self.__container.add_stream("png", rate=30)
+                stream.pix_fmt = "rgb24"
+            else:
+                stream = self.__container.add_stream("libx264", rate=30)
+                stream.pix_fmt = "yuv420p"
+        self.__tracks[track] = RecorderContext(stream)
+        
+    async def on_add_track(self, track: MediaStreamTrack, pc: RTCPeerConnection) -> None:
+        async with self.lock:
+            self.addTrack(track=track)
+            if self.recording:
+                self.video_poster = self.widget.add_video_poster(self.on_frame)
+                self.audio_poster = self.widget.add_audio_poster(self.on_frame)
+                
+    async def on_frame(self, frame: VideoFrame | AudioFrame, ctx: dict, track: MediaStreamTrack):
+        context: RecorderContext = self.__tracks.get(track)
+        if not context:
+            return
+        if not self.post:
+            frame = ctx["_org_frame_"]
+        if not context.started:
+            # adjust the output size to match the first frame
+            if isinstance(frame, VideoFrame):
+                context.stream.width = frame.width
+                context.stream.height = frame.height
+            context.started = True
+        for packet in context.stream.encode(frame):
+            self.__container.mux(packet)
+
+            
+    async def a_start(self) -> None:
+        async with self.lock:
+            if not self.recording:
+                self.recording = True
+                self.video_poster = self.widget.add_video_poster(self.on_frame)
+                self.audio_poster = self.widget.add_audio_poster(self.on_frame)
+        
+    async def a_stop(self) -> None:
+        async with self.lock:
+            if self.recording:
+                self.recording = False
+                self.widget.remove_video_poster(self.video_poster)
+                self.widget.remove_audio_poster(self.audio_poster)
+                if self.__container:
+                    for track, context in self.__tracks.items():
+                        for packet in context.stream.encode(None):
+                            self.__container.mux(packet)
+                    self.__tracks = {}
+                    self.__container.close()
+                    self.__container = None
+                    
+    def start(self) -> None:
+        asyncio.create_task(self.a_start())
+        
+    def stop(self) -> None:
+        asyncio.create_task(self.a_stop())
