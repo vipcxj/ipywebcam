@@ -155,3 +155,5 @@ ipywebcam/nbextension/index.*
 ipywebcam/labextension
 
 .vscode
+
+.mp4
