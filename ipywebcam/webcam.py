@@ -13,8 +13,11 @@ from os import path
 import asyncio
 from contextlib import contextmanager
 from dataclasses import dataclass, field
+from datetime import date, datetime, time, timedelta
 from threading import RLock
+import re
 import inspect
+from string import Template
 import logging
 import uuid
 from typing import Awaitable, Callable, Generic, Optional, TypeVar, Union, IO, Any as AnyType
@@ -747,7 +750,229 @@ class RecorderContext:
     def __init__(self, stream):
         self.started = False
         self.stream = stream
+        
+        
+class FileRuler:
+    delimiter = '$'
+    idpattern = r'(?a:[_a-z][_a-z0-9]*)'
+    braceidpattern = None
+    template: str
+    base: str
+    
+    def __init_subclass__(cls):
+        super().__init_subclass__()
+        if 'pattern' in cls.__dict__:
+            pattern = cls.pattern
+        else:
+            delim = re.escape(cls.delimiter)
+            id = cls.idpattern
+            bid = cls.braceidpattern or cls.idpattern
+            pattern = fr"""
+            {delim}(?:
+              (?P<escaped>{delim})  |   # Escape sequence of two delimiters
+              (?P<named>{id})       |   # delimiter and a Python identifier
+              {{(?P<braced>{bid})}} |   # delimiter and a braced identifier
+              (?P<invalid>)             # Other ill-formed delimiter exprs
+            )
+            """
+        cls.pattern = re.compile(pattern, re.IGNORECASE | re.VERBOSE)
+    
+    def __init__(self, template: str, base: str=None) -> None:
+        self.template = template
+        self.base = base.replace('\\', '/') if base else None
+        today = datetime.today()
+        monday = today - timedelta(days=today.weekday())
+        weeks = [monday + timedelta(days=i) for i in range(0, 7)]
+        months = [datetime.strptime(s, "%y-%m-%d") for s in [f"99-{m:02}-01" for m in range(1, 13)]]
+        am_and_pm = [datetime.strptime(s, "%y-%m-%d:%H:%M:%S") for s in ['99-01-01:06:00:00', '99-01-01:16:00:00']]
+        a_list = "|".join([day.strftime("%a") for day in weeks])
+        self.reg_a = f"({a_list})"
+        A_list = "|".join([day.strftime("%A") for day in weeks])
+        self.reg_A = f"({A_list})"
+        b_list = "|".join([month.strftime("%b") for month in months])
+        self.reg_b = f"({b_list})"
+        B_list = "|".join([month.strftime("%B") for month in months])
+        self.reg_B = f"({B_list})"
+        p_list = "|".join([am_or_pm.strftime("%p") for am_or_pm in am_and_pm])
+        self.reg_p = f"({p_list})"
+        self.reg_map = {
+            'u': '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}',
+            'uuid': '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}',
+            'uh': '[0-9a-f]{32}',
+            'uh2': '[0-9a-f]{2}',
+            'uh3': '[0-9a-f]{3}',
+            'uh4': '[0-9a-f]{4}',
+            'uh5': '[0-9a-f]{5}',
+            'uh6': '[0-9a-f]{6}',
+            'uh7': '[0-9a-f]{7}',
+            'uh8': '[0-9a-f]{8}',
+            'uuhex': '[0-9a-f]{32}',
+            'uuhex2': '[0-9a-f]{2}',
+            'uuhex3': '[0-9a-f]{3}',
+            'uuhex4': '[0-9a-f]{4}',
+            'uuhex5': '[0-9a-f]{5}',
+            'uuhex6': '[0-9a-f]{6}',
+            'uuhex7': '[0-9a-f]{7}',
+            'uuhex8': '[0-9a-f]{8}',
+            'a': self.reg_a,
+            'A': self.reg_A,
+            'b': self.reg_b,
+            'B': self.reg_B,
+            'y': '\d{2}',
+            'Y': '\d{4}',
+            'm': '(0[1-9]|1[0-2])',
+            'w': '[0-6]',
+            'd': '(0[1-9]|[12][0-9]|3[01])',
+            'H': '([01][0-9]|2[0-3])',
+            'I': '(0[1-9]|1[0-2])',
+            'p': self.reg_p,
+            'M': '([0-5][0-9]|60)',
+            'S': '([0-5][0-9]|60)',
+            'f': '\d{6}',
+            'z': '([+-]([01][0-9]|2[0-3])([0-5][0-9]|60))?',
+            'Z': '([A-Z]+)?',
+            'j': '([012]\d\d|3[0-5]\d|36[0-6])',
+            'U': '([0-4]\d|5[0-3])',
+            'W': '([0-4]\d|5[0-3])',
+        }
+        
+    def full_path(self, p: str) -> str:
+        p = p.replace('\\', '/')
+        return path.normpath(p) if not self.base else path.normpath(path.join(self.base, p))
+    
+    def is_index_key(self, key: str) -> bool:
+        return key in ['i', 'i2', 'i3', 'i4', 'i5', 'i6', 'index', 'index2', 'index3', 'index4', 'index5', 'index6']
+    
+    def format_index(self, index: int, pattern: str):
+        last = pattern[-1:]
+        if last.isnumeric():
+            len = int(last)
+            return f"{{index:0{len}}}".format(index=index)
+        else:
+            return str(index)
 
+    def _invalid(self, mo: re.Match[str]):
+        i = mo.start('invalid')
+        lines = self.template[:i].splitlines(keepends=True)
+        if not lines:
+            colno = 1
+            lineno = 1
+        else:
+            colno = i - len(''.join(lines[:-1]))
+            lineno = len(lines)
+        raise ValueError('Invalid placeholder in string: line %d, col %d' %
+                         (lineno, colno))
+        
+    def generate(self, index: int, full: bool=True) -> str:
+        now = datetime.now()
+        i2 = f'{index:02}'
+        i3 = f'{index:03}'
+        i4 = f'{index:04}'
+        i5 = f'{index:05}'
+        i6 = f'{index:06}'
+        id = uuid.uuid4()
+        uh2 = id.hex[0:2]
+        uh3 = id.hex[0:3]
+        uh4 = id.hex[0:4]
+        uh5 = id.hex[0:5]
+        uh6 = id.hex[0:6]
+        uh7 = id.hex[0:7]
+        uh8 = id.hex[0:8]
+        mapping = {
+            'i': index,
+            'i2': i2,
+            'i3': i3,
+            'i4': i4,
+            'i5': i5,
+            'i6': i6,
+            'index': index,
+            'index2': i2,
+            'index3': i3,
+            'index4': i4,
+            'index5': i5,
+            'index6': i6,
+            'u': str(id),
+            'uuid': str(id),
+            'uh': id.hex,
+            'uh2': uh2,
+            'uh3': uh3,
+            'uh4': uh4,
+            'uh5': uh5,
+            'uh6': uh6,
+            'uh7': uh7,
+            'uh8': uh8,
+            'uuhex': id.hex,
+            'uuhex2': uh2,
+            'uuhex3': uh3,
+            'uuhex4': uh4,
+            'uuhex5': uh5,
+            'uuhex6': uh6,
+            'uuhex7': uh7,
+            'uuhex8': uh8,
+            'a': now.strftime('%a'),
+            'A': now.strftime('%A'),
+            'b': now.strftime('%b'),
+            'B': now.strftime('%B'),
+            'Y': now.strftime('%Y'),
+            'y': now.strftime('%y'),
+            'm': now.strftime('%m'),
+            'w': now.strftime('%w'),
+            'd': now.strftime('%d'),
+            'H': now.strftime('%H'),
+            'I': now.strftime('%I'),
+            'p': now.strftime('%p'),
+            'M': now.strftime('%M'),
+            'S': now.strftime('%S'),
+            'f': now.strftime('%f'),
+            'z': now.strftime('%z'),
+            'Z': now.strftime('%Z'),
+            'j': now.strftime('%j'),
+            'U': now.strftime('%U'),
+            'W': now.strftime('%W'),
+        }
+        def convert(mo: re.Match[str]):
+            # Check the most common path first.
+            named = mo.group('named') or mo.group('braced')
+            if named is not None:
+                if self.is_index_key(named):
+                    return self.format_index(index=index, pattern=named)
+                else:
+                    return str(mapping[named])
+            if mo.group('escaped') is not None:
+                return self.delimiter
+            if mo.group('invalid') is not None:
+                raise ValueError(f"Unrecognized key {mo.group('invalid')} in expression {self.template}")
+            raise ValueError('Unrecognized named group in pattern',
+                             self.pattern)
+        t = self.pattern.sub(convert, self.template)
+        return self.full_path(t) if full else path.normpath(t.replace('\\', '/'))
+    
+    def to_reg(self, index: int) -> str:
+        parts = re.split(pattern=self.pattern, string=self.template)
+        if len(parts) == 0:
+            return ""
+        else:
+            res = ""
+            for i, part in enumerate(parts):
+                if i % 5 == 0:
+                    res += re.escape(part)
+                elif part is not None:
+                    if i % 5 == 1:
+                        res += re.escape(self.delimiter)
+                    elif i % 5 == 2 or i % 5 == 3:
+                        if self.is_index_key(part):
+                            res += re.escape(self.format_index(index=index, pattern=part))
+                        else:
+                            reg = self.reg_map.get(part)
+                            if reg is None:
+                                raise ValueError(f'Unrecognized key {part} in expression {self.template}')
+                            res += reg
+                    elif i % 5 == 4:
+                        raise ValueError(f'Unrecognized key {part} in expression {self.template}')
+            return res
+        
+FileRuler.__init_subclass__()
+        
 class WebCamRecorder:
     post: bool
     def __init__(self, widget: WebCamWidget, file: str | IO, post: bool=True, format: str=None, options:dict={}, **kargs) -> None:
