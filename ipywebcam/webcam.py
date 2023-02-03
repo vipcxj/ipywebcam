@@ -15,6 +15,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta
 from threading import RLock
+from urllib.parse import parse_qs, quote, urlencode, urlparse, urlunparse
 import re
 import inspect
 from string import Template
@@ -752,12 +753,73 @@ class RecorderContext:
         self.stream = stream
         
         
-class FileRuler:
+class Record:
+    file: str
+    format: str | None
+    options: dict | None
+    __container: AnyType | None
+    __tracks: dict[MediaStreamTrack, RecorderContext] | None
+    __factory: "RecordFactory"
+    
+    def __init__(self, factory: "RecordFactory", file: str, format: str | None=None, options: dict | None=None) -> None:
+        self.file = file
+        self.format = format
+        self.options = options
+        self.__factory = factory
+        
+    @property
+    def factory(self) -> "RecordFactory":
+        return self.__factory
+        
+    @staticmethod
+    def of(factory: "RecordFactory", url: str):
+        res = urlparse(url=url)
+        query = res.query
+        format: str | None = None
+        options: dict = {}
+        if res.query:
+            query = parse_qs(res.query)
+            if "format" in query and query['format']:
+                format = query['format'][0]
+            for key in query.keys():
+                if key.startswith("options.") and query[key]:
+                    options[key[8:]] = str(query[key][0])
+            
+        return Record(factory=factory, file=res.path, format=format, options=options)
+    
+    def __repr__(self) -> str:
+        query = {}
+        if self.format:
+            query["format"] = self.format
+        if self.options:
+            for key in self.options.keys():
+                query[f"options.{key}"] = self.options[key]
+        return urlunparse(('', '', self.file, '', urlencode(query=query), ''))
+    
+    def __str__(self) -> str:
+        return self.__repr__()
+    
+    def open(self, mode: str):
+        self.close()
+        self.__container = av_open(file=self.__factory._full_path(self.file), mode=mode, format=self.format, options=self.options)
+        self.__tracks = {}
+        
+    def close(self):
+        pass
+        
+class RecordFactory:
     delimiter = '$'
     idpattern = r'(?a:[_a-z][_a-z0-9]*)'
     braceidpattern = None
+    name: str
     template: str
-    base: str
+    base_path: str
+    base_index: int
+    format: str | None
+    options: dict | None
+    __record_list: list[Record] | None
+    __pending_record: Record = None
+    
     
     def __init_subclass__(cls):
         super().__init_subclass__()
@@ -777,25 +839,30 @@ class FileRuler:
             """
         cls.pattern = re.compile(pattern, re.IGNORECASE | re.VERBOSE)
     
-    def __init__(self, template: str, base: str=None) -> None:
+    def __init__(self, name: str, template: str, base: str=None, base_index=1, format: str | None = None, options: dict | None = None) -> None:
+        self.name = name
         self.template = template
-        self.base = base.replace('\\', '/') if base else None
+        self.base_path = base.replace('\\', '/') if base else None
+        self.base_index = base_index
+        self.format = format
+        self.options = options
+        self.__record_list = None
         today = datetime.today()
         monday = today - timedelta(days=today.weekday())
         weeks = [monday + timedelta(days=i) for i in range(0, 7)]
         months = [datetime.strptime(s, "%y-%m-%d") for s in [f"99-{m:02}-01" for m in range(1, 13)]]
         am_and_pm = [datetime.strptime(s, "%y-%m-%d:%H:%M:%S") for s in ['99-01-01:06:00:00', '99-01-01:16:00:00']]
         a_list = "|".join([day.strftime("%a") for day in weeks])
-        self.reg_a = f"({a_list})"
+        self._reg_a = f"({a_list})"
         A_list = "|".join([day.strftime("%A") for day in weeks])
-        self.reg_A = f"({A_list})"
+        self._reg_A = f"({A_list})"
         b_list = "|".join([month.strftime("%b") for month in months])
-        self.reg_b = f"({b_list})"
+        self._reg_b = f"({b_list})"
         B_list = "|".join([month.strftime("%B") for month in months])
-        self.reg_B = f"({B_list})"
+        self._reg_B = f"({B_list})"
         p_list = "|".join([am_or_pm.strftime("%p") for am_or_pm in am_and_pm])
-        self.reg_p = f"({p_list})"
-        self.reg_map = {
+        self._reg_p = f"({p_list})"
+        self._reg_map = {
             'u': '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}',
             'uuid': '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}',
             'uh': '[0-9a-f]{32}',
@@ -814,10 +881,10 @@ class FileRuler:
             'uuhex6': '[0-9a-f]{6}',
             'uuhex7': '[0-9a-f]{7}',
             'uuhex8': '[0-9a-f]{8}',
-            'a': self.reg_a,
-            'A': self.reg_A,
-            'b': self.reg_b,
-            'B': self.reg_B,
+            'a': self._reg_a,
+            'A': self._reg_A,
+            'b': self._reg_b,
+            'B': self._reg_B,
             'y': '\d{2}',
             'Y': '\d{4}',
             'm': '(0[1-9]|1[0-2])',
@@ -825,7 +892,7 @@ class FileRuler:
             'd': '(0[1-9]|[12][0-9]|3[01])',
             'H': '([01][0-9]|2[0-3])',
             'I': '(0[1-9]|1[0-2])',
-            'p': self.reg_p,
+            'p': self._reg_p,
             'M': '([0-5][0-9]|60)',
             'S': '([0-5][0-9]|60)',
             'f': '\d{6}',
@@ -836,14 +903,14 @@ class FileRuler:
             'W': '([0-4]\d|5[0-3])',
         }
         
-    def full_path(self, p: str) -> str:
+    def _full_path(self, p: str) -> str:
         p = p.replace('\\', '/')
-        return path.normpath(p) if not self.base else path.normpath(path.join(self.base, p))
+        return path.normpath(p) if not self.base_path else path.normpath(path.join(self.base_path, p))
     
-    def is_index_key(self, key: str) -> bool:
+    def _is_index_key(self, key: str) -> bool:
         return key in ['i', 'i2', 'i3', 'i4', 'i5', 'i6', 'index', 'index2', 'index3', 'index4', 'index5', 'index6']
     
-    def format_index(self, index: int, pattern: str):
+    def _format_index(self, index: int, pattern: str):
         last = pattern[-1:]
         if last.isnumeric():
             len = int(last)
@@ -934,8 +1001,8 @@ class FileRuler:
             # Check the most common path first.
             named = mo.group('named') or mo.group('braced')
             if named is not None:
-                if self.is_index_key(named):
-                    return self.format_index(index=index, pattern=named)
+                if self._is_index_key(named):
+                    return self._format_index(index=index, pattern=named)
                 else:
                     return str(mapping[named])
             if mo.group('escaped') is not None:
@@ -945,7 +1012,7 @@ class FileRuler:
             raise ValueError('Unrecognized named group in pattern',
                              self.pattern)
         t = self.pattern.sub(convert, self.template)
-        return self.full_path(t) if full else path.normpath(t.replace('\\', '/'))
+        return self._full_path(t) if full else path.normpath(t.replace('\\', '/'))
     
     def to_reg(self, index: int) -> str:
         parts = re.split(pattern=self.pattern, string=self.template)
@@ -960,10 +1027,10 @@ class FileRuler:
                     if i % 5 == 1:
                         res += re.escape(self.delimiter)
                     elif i % 5 == 2 or i % 5 == 3:
-                        if self.is_index_key(part):
-                            res += re.escape(self.format_index(index=index, pattern=part))
+                        if self._is_index_key(part):
+                            res += re.escape(self._format_index(index=index, pattern=part))
                         else:
-                            reg = self.reg_map.get(part)
+                            reg = self._reg_map.get(part)
                             if reg is None:
                                 raise ValueError(f'Unrecognized key {part} in expression {self.template}')
                             res += reg
@@ -971,7 +1038,37 @@ class FileRuler:
                         raise ValueError(f'Unrecognized key {part} in expression {self.template}')
             return res
         
-FileRuler.__init_subclass__()
+    def load(self) -> "RecordFactory":
+        record_list_path = self._full_path(f'{self.name}.record_list')
+        if path.exists(record_list_path):
+            with open(record_list_path) as f:
+                self.__record_list = [Record.of(self, line) for line in f.readlines()]
+        else:
+            self.__record_list = []
+        return self
+    
+    def _ensure_loaded(self):
+        if self.__record_list is None:
+            raise RuntimeError(f"The record factory {self.name} has not been loaded. You must load it at first.")
+            
+    def append(self, record: Record):
+        pass
+    
+    def flush(self):
+        self._ensure_loaded()
+        pass
+                
+    def new_record(self) -> Record:
+        self._ensure_loaded()
+        if self.__pending_record is not None:
+            raise RuntimeError(f"The record factory {self.name} has a pending record. Please flush first.")
+        file = self.generate(self.base_index + len(self.__record_list))
+        self.__pending_record = Record(factory=self, file=file, format=self.format, options=self.options)
+        return self.__pending_record
+        
+                    
+        
+RecordFactory.__init_subclass__()
         
 class WebCamRecorder:
     post: bool
@@ -986,7 +1083,7 @@ class WebCamRecorder:
         self.lock = asyncio.Lock()
         self.widget.add_track_callback(self.on_add_track)
         
-    def addTrack(self, track: MediaStreamTrack):
+    def _add_Track(self, track: MediaStreamTrack):
         """
         Add a track to be recorded.
 
@@ -1011,25 +1108,26 @@ class WebCamRecorder:
         
     async def on_add_track(self, track: MediaStreamTrack, pc: RTCPeerConnection) -> None:
         async with self.lock:
-            self.addTrack(track=track)
+            self._add_Track(track=track)
             if self.recording:
                 self.video_poster = self.widget.add_video_poster(self.on_frame)
                 self.audio_poster = self.widget.add_audio_poster(self.on_frame)
                 
     async def on_frame(self, frame: VideoFrame | AudioFrame, ctx: dict, track: MediaStreamTrack):
-        context: RecorderContext = self.__tracks.get(track)
-        if not context:
-            return
-        if not self.post:
-            frame = ctx["_org_frame_"]
-        if not context.started:
-            # adjust the output size to match the first frame
-            if isinstance(frame, VideoFrame):
-                context.stream.width = frame.width
-                context.stream.height = frame.height
-            context.started = True
-        for packet in context.stream.encode(frame):
-            self.__container.mux(packet)
+        async with self.lock:
+            context: RecorderContext = self.__tracks.get(track)
+            if not context:
+                return
+            if not self.post:
+                frame = ctx["_org_frame_"]
+            if not context.started:
+                # adjust the output size to match the first frame
+                if isinstance(frame, VideoFrame):
+                    context.stream.width = frame.width
+                    context.stream.height = frame.height
+                context.started = True
+            for packet in context.stream.encode(frame):
+                self.__container.mux(packet)
 
             
     async def a_start(self) -> None:
