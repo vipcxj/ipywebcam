@@ -758,6 +758,7 @@ class Record:
     format: str | None
     options: dict | None
     __container: AnyType | None
+    __mode: str
     __tracks: dict[MediaStreamTrack, RecorderContext] | None
     __factory: "RecordFactory"
     
@@ -799,13 +800,61 @@ class Record:
     def __str__(self) -> str:
         return self.__repr__()
     
+    def add_track(self, track: MediaStreamTrack, open: bool=False) -> None:
+        if self.__container is None:
+            if open:
+                self.open('w')
+            else:
+                raise("The record has not been opened!")
+        elif self.__mode != "w":
+            raise("The record has not been opened for write!")
+        
+        if track.kind == "audio":
+            if self.__container.format.name in ("wav", "alsa"):
+                codec_name = "pcm_s16le"
+            elif self.__container.format.name == "mp3":
+                codec_name = "mp3"
+            else:
+                codec_name = "aac"
+            stream = self.__container.add_stream(codec_name)
+        else:
+            if self.__container.format.name == "image2":
+                stream = self.__container.add_stream("png", rate=30)
+                stream.pix_fmt = "rgb24"
+            else:
+                stream = self.__container.add_stream("libx264", rate=30)
+                stream.pix_fmt = "yuv420p"
+        self.__tracks[track] = RecorderContext(stream)
+        
+    @property
+    def full_path(self):
+        return self.__factory._full_path(self.file)
+    
     def open(self, mode: str):
         self.close()
-        self.__container = av_open(file=self.__factory._full_path(self.file), mode=mode, format=self.format, options=self.options)
+        self.__mode = mode
+        self.__container = av_open(file=self.full_path, mode=mode, format=self.format, options=self.options)
         self.__tracks = {}
         
     def close(self):
-        pass
+        if self.__container:
+            for context in self.__tracks.values():
+                for packet in context.stream.encode(None):
+                    self.__container.mux(packet)
+            self.__tracks = None
+            self.__container.close()
+            self.__container = None
+            self.__mode = None
+            
+    def relay_tracks_to(self, record: "Record"):
+        if not self.__container:
+            raise RuntimeError(f"The record is not open: {self.full_path}")
+        if self.full_path == record.full_path:
+            raise RuntimeError(f"Unable to relay tracks between records with same path: {self.full_path}")
+        for track in self.__tracks.keys():
+            record.add_track(track=track, open=True)
+        
+        
         
 class RecordFactory:
     delimiter = '$'
@@ -1065,6 +1114,10 @@ class RecordFactory:
         file = self.generate(self.base_index + len(self.__record_list))
         self.__pending_record = Record(factory=self, file=file, format=self.format, options=self.options)
         return self.__pending_record
+    
+    def get_or_create_pending_record(self) -> Record:
+        self._ensure_loaded()
+        return self.__pending_record if self.__pending_record is not None else self.new_record()
         
                     
         
