@@ -156,4 +156,4 @@ ipywebcam/labextension
 
 .vscode
 
-.mp4
+*.mp4
