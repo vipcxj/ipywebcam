@@ -157,3 +157,4 @@ ipywebcam/labextension
 .vscode
 
 *.mp4
+*.record_list

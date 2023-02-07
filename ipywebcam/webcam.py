@@ -50,9 +50,9 @@ relay = MediaRelay()
 
 MT = TypeVar('MT', VideoFrame, AudioFrame)
 class MediaTransformer(Generic[MT]):
-    def __init__(self, callback: Callable[[MT, dict, MediaStreamTrack], Union[MT, Awaitable[MT]]], context: dict = {}) -> None:
+    def __init__(self, callback: Callable[[MT, dict, MediaStreamTrack], Union[MT, Awaitable[MT]]], context: dict | None = None) -> None:
         self.callback = callback
-        self.context = context
+        self.context = context if context is not None else {}
         self.iscoroutinefunction = inspect.iscoroutinefunction(self.callback)
         sig = inspect.signature(self.callback)
         self.require_ctx =  len(sig.parameters) > 1
@@ -61,19 +61,19 @@ class MediaTransformer(Generic[MT]):
     async def transform(self, frame: MT, track: MediaStreamTrack=None) -> MT | None:
         if self.iscoroutinefunction:
             if self.require_ctx and self.require_track:
-                frame = await self.callback(frame, self.context, track)
+                out_frame = await self.callback(frame, self.context, track)
             elif self.require_ctx:
-                frame = await self.callback(frame, self.context)
+                out_frame = await self.callback(frame, self.context)
             else:
-                frame = await self.callback(frame)
+                out_frame = await self.callback(frame)
         else:
             if self.require_ctx and self.require_track:
-                frame = self.callback(frame, self.context, track)
+                out_frame = self.callback(frame, self.context, track)
             elif self.require_ctx:
-                frame = self.callback(frame, self.context)
+                out_frame = self.callback(frame, self.context)
             else:
-                frame = self.callback(frame)
-        return frame
+                out_frame = self.callback(frame)
+        return out_frame
 
 
 class WithMediaTransformers:
@@ -814,6 +814,7 @@ class Record:
             return
         if not post:
             frame = ctx["_org_frame_"]
+            
         if not context.started:
             # adjust the output size to match the first frame
             if isinstance(frame, VideoFrame):
@@ -867,17 +868,23 @@ class RecordFactory(metaclass=ABCMeta):
         pass
     
     @abstractmethod
-    def next_record(self, context_map: dict[MediaStreamTrack, RecordConditionContext]) -> Tuple[Record, Record]:
+    def next_record(self, context_map: dict[MediaStreamTrack, RecordConditionContext], track: MediaStreamTrack) -> Tuple[Record, Record]:
         pass
-    
-    def _ensure_open(self):
-        if self.__record_list is None:
-            raise RuntimeError(f"The record factory {self.name} has not been loaded. You must open it at first.")
     
     @property
     @abstractmethod
     def name(self) -> str:
         pass
+    
+RecordConditionType = Callable[[dict[MediaStreamTrack, RecordConditionContext], MediaStreamTrack], bool]
+
+class TrackStrategy(Enum):
+    ALL_TRACK = 1
+    ANY_TRACK = 2
+    ALL_VIDEO_TRACK = 3
+    ANY_VIDEO_TRACK = 4
+    ALL_AUDIO_TRACK = 5
+    ANY_AUDIO_TRACK = 6
         
 class FileListFactory(RecordFactory):
     delimiter = '$'
@@ -890,7 +897,7 @@ class FileListFactory(RecordFactory):
     base_index: int
     format: str | None
     options: dict | None
-    __condition: Callable[[dict[MediaStreamTrack, RecordConditionContext]], None]
+    __condition: RecordConditionType
     __record_list: list[Record] | None
     __pending_record: Record = None
     
@@ -916,7 +923,7 @@ class FileListFactory(RecordFactory):
     def __init__(
         self, name: str,
         template: str,
-        condition: Callable[[dict[MediaStreamTrack, RecordConditionContext]], None]=lambda ctx: True,
+        condition: RecordConditionType=lambda context_map, track: True,
         flush_when_stop: bool = True,
         base_path: str=None,
         base_index: int=1,
@@ -1014,6 +1021,42 @@ class FileListFactory(RecordFactory):
             lineno = len(lines)
         raise ValueError('Invalid placeholder in string: line %d, col %d' %
                          (lineno, colno))
+        
+    def _ensure_open(self):
+        if self.__record_list is None:
+            raise RuntimeError(f"The record factory {self.name} has not been loaded. You must open it at first.")
+        
+    @staticmethod
+    def create_time_based_condition(duration: float, track_strategy: TrackStrategy=TrackStrategy.ANY_TRACK) -> RecordConditionType:
+        def condition(context_map: dict[MediaStreamTrack, RecordConditionContext], current_track: MediaStreamTrack) -> bool:
+            if (track_strategy == TrackStrategy.ALL_VIDEO_TRACK or track_strategy == TrackStrategy.ANY_VIDEO_TRACK) and current_track.kind != "video":
+                return True
+            if (track_strategy == TrackStrategy.ALL_AUDIO_TRACK or track_strategy == TrackStrategy.ANY_AUDIO_TRACK) and current_track.kind != "audio":
+                return True
+            for track, context in context_map.items():
+                check = context.timestamp - context.base_timestamp <= duration
+                if (track_strategy == TrackStrategy.ALL_TRACK or track_strategy == TrackStrategy.ALL_VIDEO_TRACK or track_strategy == TrackStrategy.ALL_AUDIO_TRACK) and not check:
+                    return False
+                if (track_strategy == TrackStrategy.ANY_TRACK or track_strategy == TrackStrategy.ANY_VIDEO_TRACK or track_strategy == TrackStrategy.ANY_AUDIO_TRACK) and check:
+                    return True
+            return False
+        return condition
+    
+    @staticmethod
+    def create_frame_based_condition(count: int, track_strategy: TrackStrategy=TrackStrategy.ANY_TRACK) -> RecordConditionContext:
+        def condition(context_map: dict[MediaStreamTrack, RecordConditionContext], current_track: MediaStreamTrack) -> bool:
+            if (track_strategy == TrackStrategy.ALL_VIDEO_TRACK or track_strategy == TrackStrategy.ANY_VIDEO_TRACK) and track.kind != "video":
+                return True
+            if (track_strategy == TrackStrategy.ALL_AUDIO_TRACK or track_strategy == TrackStrategy.ANY_AUDIO_TRACK) and track.kind != "audio":
+                return True
+            for track, context in context_map.items():
+                check = context.recorded_frame_count <= count
+                if (track_strategy == TrackStrategy.ALL_TRACK or track_strategy == TrackStrategy.ALL_VIDEO_TRACK or track_strategy == TrackStrategy.ALL_AUDIO_TRACK) and not check:
+                    return False
+                if (track_strategy == TrackStrategy.ANY_TRACK or track_strategy == TrackStrategy.ANY_VIDEO_TRACK or track_strategy == TrackStrategy.ANY_AUDIO_TRACK) and check:
+                    return True
+            return False
+        return condition
         
     def name(self) -> str:
         return self.name
@@ -1130,7 +1173,8 @@ class FileListFactory(RecordFactory):
         record_list_path = self._full_path(f'{self.name}.record_list')
         if path.exists(record_list_path):
             with open(record_list_path) as f:
-                self.__record_list = [self.restore_record_from_url(self, line) for line in f.readlines()]
+                self.__record_list = [self.restore_record_from_url(line) for line in f.read().splitlines() if line]
+                print(f"load {len(self.__record_list)} records")
         else:
             self.__record_list = []
         return self
@@ -1141,7 +1185,7 @@ class FileListFactory(RecordFactory):
             self.flush()
         record_list_path = self._full_path(f'{self.name}.record_list')
         with open(record_list_path, 'w') as f:
-            f.writelines([str(record) for record in self.__record_list])
+            f.writelines([f"{record}\n" for record in self.__record_list])
         self.__record_list = None
     
     def flush(self):
@@ -1149,9 +1193,10 @@ class FileListFactory(RecordFactory):
         if self.__pending_record:
             self.__pending_record.close()
             self.__record_list.append(self.__pending_record)
+            self.__pending_record = None
                 
-    def create_next_record(self) -> Record:
-        file = self.generate(self.base_index + len(self.__record_list), full=True)
+    def create_next_record(self, index: int) -> Record:
+        file = self.generate(index=index, full=True)
         return Record(file=file, format=self.format, options=self.options)
     
     def restore_record_from_url(self, url: str):
@@ -1172,15 +1217,15 @@ class FileListFactory(RecordFactory):
     def get_or_create_pending_record(self) -> Record:
         self._ensure_open()
         if not self.__pending_record:
-            self.__pending_record = self.create_next_record()
+            self.__pending_record = self.create_next_record(self.base_index + len(self.__record_list))
         return self.__pending_record
     
-    def next_record(self, context_map: dict[MediaStreamTrack, RecordConditionContext]) -> Tuple[Record, Record]:
+    def next_record(self, context_map: dict[MediaStreamTrack, RecordConditionContext], track: MediaStreamTrack) -> Tuple[Record, Record]:
         self._ensure_open()
         old = self.__pending_record
-        if self.__condition(context_map):
+        if self.__condition(context_map, track):
             return self.get_or_create_pending_record(), old
-        record = self.create_next_record()
+        record = self.create_next_record(self.base_index + len(self.__record_list) + 1)
         if self.__pending_record:
             self.__pending_record.relay_tracks_to(record=record)
             self.__pending_record.close()
@@ -1224,7 +1269,7 @@ class SingleFileFactory(RecordFactory):
             base = path.basename(self.file.name)
         return path.splitext(base)[0]
     
-    def next_record(self, context_map: dict[MediaStreamTrack, RecordConditionContext]) -> Tuple[Record, Record]:
+    def next_record(self, context_map: dict[MediaStreamTrack, RecordConditionContext], track: MediaStreamTrack) -> Tuple[Record, Record]:
         old = self.record
         if old is None:
             self.record = Record(file=self.file, format=self.format, options=self.format)
@@ -1253,15 +1298,12 @@ class WebCamRecorder:
     async def on_add_track(self, track: MediaStreamTrack, pc: RTCPeerConnection) -> None:
         async with self.lock:
             context_map = self.init_record_condition_context(track=track)
-            record, _ = self.factory.next_record(context_map=context_map)
+            record, _ = self.factory.next_record(context_map=context_map, track=track)
             record.add_track(track=track, open=True)
-            if self.recording:
-                self.video_poster = self.widget.add_video_poster(self.on_frame)
-                self.audio_poster = self.widget.add_audio_poster(self.on_frame)
                 
     async def on_frame(self, frame: VideoFrame | AudioFrame, ctx: dict, track: MediaStreamTrack):
         async with self.lock:
-            (record, old_record) = self.factory.next_record(context_map=self.context_map)
+            (record, old_record) = self.factory.next_record(context_map=self.context_map, track=track)
             context = self.context_map.get(track)
             if record != old_record:
                 context.recorded_frame_count = 0
