@@ -4,7 +4,7 @@
 # Copyright (c) Xiaojing Chen.
 # Distributed under the terms of the Modified BSD License.
 
-from .webcam import WebCamWidget, WebCamRecorder, Record, RecordFactory, FileListFactory, SingleFileFactory
+from .webcam import WebCamWidget, WebCamRecorder, Record, RecordFactory, FileListFactory, SingleFileFactory, TrackStrategy
 from ._version import __version__, version_info
 
 def _jupyter_labextension_paths():
