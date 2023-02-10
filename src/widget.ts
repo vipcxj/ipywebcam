@@ -8,13 +8,13 @@ import {
 } from '@jupyter-widgets/base';
 import Backbone from 'backbone';
 
+import { BaseModel } from './common';
 import {
   createPeerConnection,
   negotiate,
   waitForConnectionState,
 } from './webrtc';
 import { arrayInclude } from './utils';
-import { MODULE_NAME, MODULE_VERSION } from './version';
 
 // Import the CSS
 import '../css/widget.css';
@@ -31,21 +31,10 @@ const supportsSetCodecPreferences: boolean =
   window.RTCRtpTransceiver &&
   'setCodecPreferences' in window.RTCRtpTransceiver.prototype;
 
-interface BaseCommandMessage {
-  cmd: string;
-  id: string;
-  args: Record<string, any>;
-}
-
 type DeviceType = 'video_input' | 'audio_input' | 'audio_output';
 
 interface RequestDevicesArgs {
   type: DeviceType;
-}
-
-interface RequestDevicesMessage extends BaseCommandMessage {
-  cmd: 'request_devices';
-  args: RequestDevicesArgs;
 }
 
 interface NotifyDeviceChangeArgs {
@@ -56,26 +45,12 @@ interface NotifyDeviceChangeArgs {
   };
 }
 
-interface NotifyDeviceChangeMessage extends BaseCommandMessage {
-  cmd: 'notify_device_change';
-  args: NotifyDeviceChangeArgs;
-}
+type WebCamMsgTypeMap = {
+  request_devices: RequestDevicesArgs;
+  notify_device_change: NotifyDeviceChangeArgs;
+};
 
-type CommandMessage = RequestDevicesMessage | NotifyDeviceChangeMessage;
-
-function isRequestDevicesMessage(
-  msg: BaseCommandMessage
-): msg is RequestDevicesMessage {
-  return msg.cmd === 'request_devices';
-}
-
-function isNotifyDeviceChangeMessage(
-  msg: BaseCommandMessage
-): msg is NotifyDeviceChangeMessage {
-  return msg.cmd === 'notify_device_change';
-}
-
-export class WebCamModel extends DOMWidgetModel {
+export class WebCamModel extends BaseModel<WebCamMsgTypeMap> {
   videoInput?: string;
   audioInput?: string;
 
@@ -83,11 +58,7 @@ export class WebCamModel extends DOMWidgetModel {
     return {
       ...super.defaults(),
       _model_name: WebCamModel.model_name,
-      _model_module: WebCamModel.model_module,
-      _model_module_version: WebCamModel.model_module_version,
       _view_name: WebCamModel.view_name,
-      _view_module: WebCamModel.view_module,
-      _view_module_version: WebCamModel.view_module_version,
       server_desc: null,
       client_desc: null,
       iceServers: [],
@@ -123,31 +94,26 @@ export class WebCamModel extends DOMWidgetModel {
     this.on('change:iceServers', () => {
       this.connect(undefined, true, true);
     });
-    this.on('msg:custom', (cmdMsg: CommandMessage) => {
-      const { id } = cmdMsg;
-      if (id !== this.model_id) {
-        return;
-      }
-      if (isRequestDevicesMessage(cmdMsg)) {
-        const { cmd, id, args } = cmdMsg;
-        const { type } = args;
-        this.getDevice(type).then((devices) => {
-          console.log(devices);
-          this.send({ ans: cmd, id, res: devices }, {});
-        });
-      } else if (isNotifyDeviceChangeMessage(cmdMsg)) {
-        const { args } = cmdMsg;
-        const { type, change } = args;
-        if (type === 'video_input') {
-          if (this.videoInput !== change.new) {
-            this.videoInput = change.new;
-            this.connect(undefined, true, true);
-          }
-        } else if (type === 'audio_input') {
-          if (this.audioInput !== change.new) {
-            this.audioInput = change.new;
-            this.connect(undefined, true, true);
-          }
+    this.addMessageHandler('request_devices', (cmdMsg) => {
+      const { cmd, id, args } = cmdMsg;
+      const { type } = args;
+      this.getDevice(type).then((devices) => {
+        console.log(devices);
+        this.send({ ans: cmd, id, res: devices }, {});
+      });
+    });
+    this.addMessageHandler('notify_device_change', (cmdMsg) => {
+      const { args } = cmdMsg;
+      const { type, change } = args;
+      if (type === 'video_input') {
+        if (this.videoInput !== change.new) {
+          this.videoInput = change.new;
+          this.connect(undefined, true, true);
+        }
+      } else if (type === 'audio_input') {
+        if (this.audioInput !== change.new) {
+          this.audioInput = change.new;
+          this.connect(undefined, true, true);
         }
       }
     });
@@ -175,47 +141,11 @@ export class WebCamModel extends DOMWidgetModel {
   };
 
   static model_name = 'WebCamModel';
-  static model_module = MODULE_NAME;
-  static model_module_version = MODULE_VERSION;
   static view_name = 'WebCamView'; // Set to null if no view
-  static view_module = MODULE_NAME; // Set to null if no view
-  static view_module_version = MODULE_VERSION;
 
   pc: RTCPeerConnection | undefined;
   client_stream: MediaStream | undefined;
   server_stream: MediaStream | undefined;
-
-  send_cmd = async (
-    cmd: string,
-    args: Record<string, any>,
-    wait = true
-  ): Promise<any> => {
-    const id = this.model_id;
-    if (wait) {
-      return new Promise((resolve) => {
-        // eslint-disable-next-line @typescript-eslint/no-this-alias
-        const self = this;
-        this.send({ cmd, id, args }, {});
-        function callback({
-          ans,
-          id: t_id,
-          res,
-        }: {
-          ans: string;
-          id: string;
-          res: any;
-        }) {
-          if (ans === cmd && t_id === id) {
-            resolve(res);
-            self.off('msg:custom', callback);
-          }
-        }
-        this.on('msg:custom', callback);
-      });
-    } else {
-      this.send({ cmd, id, args }, {});
-    }
-  };
 
   resetPeer = (): void => {
     this.pc = undefined;
@@ -426,7 +356,10 @@ export class WebCamModel extends DOMWidgetModel {
         });
         await negotiate(pc, async (offer) => {
           console.log(offer);
-          return this.send_cmd('exchange_peer', { desc: offer });
+          const { content } = await this.send_cmd('exchange_peer', {
+            desc: offer,
+          });
+          return content;
         });
         const pcState = await waitForConnectionState(
           pc,
@@ -516,6 +449,8 @@ export class WebCamView extends DOMWidgetView {
       const width = this.model.get('width');
       if (width) {
         video.width = width;
+      } else {
+        video.removeAttribute('width');
       }
     });
     const height = this.model.get('height');
@@ -526,6 +461,8 @@ export class WebCamView extends DOMWidgetView {
       const height = this.model.get('height');
       if (height) {
         video.height = height;
+      } else {
+        video.removeAttribute('height');
       }
     });
     video.playsInline = this.model.get('playsInline');
