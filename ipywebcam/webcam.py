@@ -474,12 +474,14 @@ class WebCamWidget(DOMWidget, BaseWidget, WithMediaTransformers):
         muted: Optional[bool] = None,
         **kwargs
     ):
-        super().__init__(**kwargs)
+        super().__init__(logger=logger, **kwargs)
         self.state_map = {}
         self.lock = RLock()
         self.track_callbacks = []
         link((self.video_codec_selector, 'options'), (self, 'video_codecs'))
         link((self.video_codec_selector, 'value'), (self, 'video_codec'))
+        self.add_answer("exchange_peer", self.answer_exchange_peer)
+        self.add_answer("sync_device", self. answer_sync_device)
         if iceServers is not None:
             self.iceServers = iceServers
         if constraints is not None:
@@ -553,26 +555,18 @@ class WebCamWidget(DOMWidget, BaseWidget, WithMediaTransformers):
         self.send_command("request_devices", id, { "type": type }, on_result=on_result)
         
         
-    def answer_exchange_peer(self, id: str, client_desc: dict[str, str]):
-        state = self.get_or_create_state(id)
-        loop.create_task(state.exchange_peer(client_desc=client_desc))
+    def answer_exchange_peer(self, id: str, cmd: str, args: dict):
+        if "desc" in args:
+            client_desc: dict[str, str] = args["desc"]
+            state = self.get_or_create_state(id)
+            loop.create_task(state.exchange_peer(client_desc=client_desc))
                 
-    def answer_sync_device(self, id: str, type: str, device_id: str):
-        state = self.get_or_create_state(id)
-        state.set_device_id(type=type, id=device_id)
-    
-    def _handle_custom_msg(self, content, buffers):
-        super()._handle_custom_msg(content, buffers)
-        if isinstance(content, dict) and "cmd" in content and "id" in content and "args" in content:
-            cmd = content.get("cmd")
-            id = content.get("id")
-            args = content.get("args")
-            if cmd == "exchange_peer" and isinstance(args, dict) and "desc" in args:
-                self.answer_exchange_peer(id, args.get("desc"))
-            elif cmd == "sync_device" and isinstance(args, dict) and "type" in args and "id" in args:
-                self.answer_sync_device(id, type=args["type"], device_id=args["id"])
-            else:
-                logger.info(f'Unhandled custom message: {content}')
+    def answer_sync_device(self, id: str, cmd: str, args: dict):
+        if "type" in args and "id" in args:
+            type: str = args["type"]
+            device_id: str = args["id"]
+            state = self.get_or_create_state(id)
+            state.set_device_id(type=type, id=device_id)
         
         
     def add_video_transformer(self, callback: Callable[[VideoFrame, dict, MediaStreamTrack], Union[VideoFrame | None, Awaitable[VideoFrame | None]]]) -> MediaTransformer[VideoFrame]:

@@ -2,6 +2,7 @@ import { DOMWidgetView } from '@jupyter-widgets/base';
 import LRU from 'lru-cache';
 
 import { BaseModel } from './common';
+import { Video } from './video';
 
 type FetchDataArgs = {
   index: number;
@@ -115,11 +116,14 @@ export class RecorderPlayerModel extends BaseModel<RecorderMsgTypeMap> {
 
 export class RecorderPlayerView extends DOMWidgetView {
   inited = false;
+  video?: Video;
 
   render(): void {
     super.render();
-    (this.luminoWidget || this.pWidget).addClass('jupyter-widgets');
-    (this.luminoWidget || this.pWidget).addClass('widget-image');
+    if (!this.video) {
+      this.video = new Video();
+      this.el.appendChild(this.video.container);
+    }
     this.update();
   }
 
@@ -130,25 +134,25 @@ export class RecorderPlayerView extends DOMWidgetView {
   updateWidth = (): void => {
     const width = this.model.get('width');
     if (width !== undefined && width.length > 0) {
-      this.el.setAttribute('width', width);
+      this.video?.video.setAttribute('width', width);
     } else {
-      this.el.removeAttribute('width');
+      this.video?.video.removeAttribute('width');
     }
   };
 
   updateHeight = (): void => {
     const height = this.model.get('height');
     if (height !== undefined && height.length > 0) {
-      this.el.setAttribute('height', height);
+      this.video?.video.setAttribute('height', height);
     } else {
-      this.el.removeAttribute('height');
+      this.video?.video.removeAttribute('height');
     }
   };
 
   updateOtherVideoAttributes = (): void => {
-    this.el.loop = this.model.get('loop');
-    this.el.autoplay = this.model.get('autoplay');
-    this.el.controls = this.model.get('controls');
+    this.video?.video.setAttribute('loop', this.model.get('loop'));
+    this.video?.video.setAttribute('autoplay', this.model.get('autoplay'));
+    this.video?.video.setAttribute('controls', this.model.get('controls'));
   };
 
   update(): void {
@@ -157,10 +161,4 @@ export class RecorderPlayerView extends DOMWidgetView {
     this.updateOtherVideoAttributes();
     return super.update();
   }
-
-  preinitialize(): void {
-    this.tagName = 'video';
-  }
-
-  el: HTMLVideoElement;
 }

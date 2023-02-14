@@ -14,3 +14,7 @@ export function arrayFind<T>(
   }
   return undefined;
 }
+
+export function isMac(): boolean {
+  return window.navigator.userAgent.indexOf('Mac') !== -1;
+}

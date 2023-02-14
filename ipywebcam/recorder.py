@@ -11,6 +11,7 @@ from typing import Any as AnyType
 from typing import Callable, Tuple
 from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
 from traitlets import Bool, Unicode, CUnicode
+import logging
 
 from aiortc import RTCPeerConnection
 from aiortc.contrib.media import MediaStreamTrack
@@ -22,6 +23,7 @@ from ._frontend import module_name, module_version
 from .common import BaseWidget
 from .webcam import MediaTransformer, WebCamWidget
 
+logger = logging.getLogger("ipywebcam")
 
 class RecorderContext:
     def __init__(self, stream):
@@ -631,11 +633,20 @@ class RecordPlayer(DOMWidget, BaseWidget):
     controls = Bool(True, help="Specifies that video controls should be displayed (such as a play/pause button etc)").tag(sync=True)
     
     def __init__(self, recorder: WebCamRecorder, **kwargs):
-        super().__init__(**kwargs)
+        super().__init__(logger=logger, **kwargs)
         self.recorder = recorder
+        self.add_answer("fetch_record_meta", self.answer_fetch_record_meta)
+        self.add_answer("fetch_media_data", self.answer_fetch_media_data)
         
     def _get_media_data(self, index: int) -> bytes | None:
         pass
     
-    def answer_fetch_media_data(self, index: int) -> None:
+    def answer_fetch_record_meta(self, id: str, cmd: str, args: dict) -> None:
         pass
+    
+    def answer_fetch_media_data(self, id: str, cmd: str, args: dict) -> None:
+        if "index" in args:
+            index = args["index"]
+            data = self._get_media_data(index=index)
+            self.answer(cmd=cmd, target_id=id, buffers=[data] if data is not None else None)
+            

@@ -1,12 +1,18 @@
-const svgNS = 'http://www.w3.org/2000/svg';
+/* eslint-disable @typescript-eslint/no-non-null-assertion */
 
-export function createSymbol(
+const svgNS = 'http://www.w3.org/2000/svg';
+const prefix = 'ipywebcam-video-';
+export function makeId(id: string): string {
+  return `${prefix}${id}`;
+}
+
+function createSymbol(
   id: string,
   pathD: string,
   viewBox = '0 0 24 24'
 ): SVGSymbolElement {
   const symbol = document.createElementNS(svgNS, 'symbol');
-  symbol.id = id;
+  symbol.id = makeId(id);
   symbol.setAttribute('viewBox', viewBox);
   const path = document.createElementNS(svgNS, 'path');
   path.setAttribute('d', pathD);
@@ -14,8 +20,10 @@ export function createSymbol(
   return symbol;
 }
 
-export function createControlsSvg(): SVGSVGElement {
+function createControlsSvg(): SVGSVGElement {
   const svg = document.createElementNS(svgNS, 'svg');
+  svg.id = makeId('icons');
+  svg.setAttribute('style', 'display: none');
   const defs = document.createElementNS(svgNS, 'defs');
   svg.appendChild(defs);
   defs.appendChild(
@@ -64,4 +72,682 @@ export function createControlsSvg(): SVGSVGElement {
     )
   );
   return svg;
+}
+
+export function createSelectiveUses(
+  active: string,
+  ...ids: string[]
+): SVGSVGElement {
+  const svg = document.createElementNS(svgNS, 'svg');
+  ids.forEach((id) => {
+    const use = document.createElementNS(svgNS, 'use');
+    use.classList.add(`use-${id}`);
+    use.setAttribute('href', `#${makeId(id)}`);
+    if (id !== active) {
+      use.classList.add('hidden');
+    }
+    svg.appendChild(use);
+  });
+  return svg;
+}
+
+export function createPlaybackAnimation(): HTMLDivElement {
+  const div = document.createElement('div');
+  div.id = makeId('playback-animation');
+  div.className = 'playback-animation';
+  const svg = createSelectiveUses('pause', 'play-icon', 'pause');
+  svg.classList.add('playback-icons');
+  div.appendChild(svg);
+  return div;
+}
+
+export function createVideoProgress(): HTMLDivElement {
+  const container = document.createElement('div');
+  container.classList.add('video-progress');
+  const progress = document.createElement('progress');
+  progress.id = makeId('progress-bar');
+  progress.classList.add('progress-bar');
+  progress.value = progress.max = 0;
+  const input = document.createElement('input');
+  input.id = makeId('seek');
+  input.classList.add('seek');
+  input.type = 'range';
+  input.value = '0';
+  input.min = '0';
+  input.step = '1';
+  const tooltip = document.createElement('div');
+  tooltip.id = makeId('seek-tooltip');
+  tooltip.classList.add('seek-tooltip');
+  tooltip.innerText = '00:00';
+  container.appendChild(progress);
+  container.appendChild(input);
+  container.appendChild(tooltip);
+  return container;
+}
+
+function createPlaybackButton(
+  options: NormaledVideoOptions
+): HTMLButtonElement {
+  const button = document.createElement('button');
+  button.id = makeId('play');
+  button.classList.add('play');
+  button.setAttribute(
+    'data-title',
+    `Play (${descShortcut(options.shortcuts.play)})`
+  );
+  const svg = createSelectiveUses('play-icon', 'play-icon', 'pause');
+  svg.classList.add('playback-icons');
+  button.appendChild(svg);
+  return button;
+}
+
+function createVolumeButton(options: NormaledVideoOptions): HTMLButtonElement {
+  const button = document.createElement('button');
+  button.id = makeId('volume-button');
+  button.classList.add('volume-button');
+  button.setAttribute(
+    'data-title',
+    `Mute (${descShortcut(options.shortcuts.mute)})`
+  );
+  const svg = createSelectiveUses(
+    'volume-high',
+    'volume-mute',
+    'volume-low',
+    'volume-high'
+  );
+  svg.classList.add('volume-icons');
+  button.appendChild(svg);
+  return button;
+}
+
+function createVolumeInput(): HTMLInputElement {
+  const input = document.createElement('input');
+  input.id = makeId('volume');
+  input.classList.add('volume');
+  input.value = '1';
+  input.type = 'range';
+  input.min = '0';
+  input.max = '1';
+  input.step = '0.01';
+  input.setAttribute('data-mute', '0.5');
+  return input;
+}
+
+function createVolumeControls(options: NormaledVideoOptions): HTMLDivElement {
+  const container = document.createElement('div');
+  container.classList.add('volume-controls');
+  const button = createVolumeButton(options);
+  container.appendChild(button);
+  const input = createVolumeInput();
+  container.appendChild(input);
+  return container;
+}
+
+function createTime(): HTMLDivElement {
+  const container = document.createElement('div');
+  container.classList.add('time');
+  const elapsed = document.createElement('time');
+  elapsed.id = makeId('time-elapsed');
+  elapsed.classList.add('time-elapsed');
+  elapsed.innerText = '00:00';
+  container.appendChild(elapsed);
+  const duration = document.createElement('time');
+  duration.id = makeId('duration');
+  duration.classList.add('duration');
+  duration.innerText = '00:00';
+  container.appendChild(duration);
+  return container;
+}
+
+function createLeftControls(options: NormaledVideoOptions): HTMLDivElement {
+  const container = document.createElement('div');
+  container.classList.add('left-controls');
+  const playbackButton = createPlaybackButton(options);
+  container.appendChild(playbackButton);
+  const volumeControls = createVolumeControls(options);
+  container.appendChild(volumeControls);
+  const time = createTime();
+  container.appendChild(time);
+  return container;
+}
+
+function createPipButton(options: NormaledVideoOptions): HTMLButtonElement {
+  const button = document.createElement('button');
+  button.id = makeId('pip-button');
+  button.classList.add('pip-button');
+  if (!isPipEnabled()) {
+    button.classList.add('hidden');
+  }
+  button.setAttribute(
+    'data-title',
+    `PIP (${descShortcut(options.shortcuts.pip)})`
+  );
+  const svg = createSelectiveUses('pip', 'pip');
+  button.appendChild(svg);
+  return button;
+}
+
+function createFullscreenButton(
+  options: NormaledVideoOptions
+): HTMLButtonElement {
+  const button = document.createElement('button');
+  button.id = makeId('fullscreen-button');
+  button.classList.add('fullscreen-button');
+  button.setAttribute(
+    'data-title',
+    `Full screen (${descShortcut(options.shortcuts.fullscreen)})`
+  );
+  const svg = createSelectiveUses(
+    'fullscreen',
+    'fullscreen',
+    'fullscreen-exit'
+  );
+  button.appendChild(svg);
+  return button;
+}
+
+function createRightControls(options: NormaledVideoOptions): HTMLDivElement {
+  const container = document.createElement('div');
+  container.classList.add('right-controls');
+  const pipButton = createPipButton(options);
+  container.appendChild(pipButton);
+  const fullscreenButton = createFullscreenButton(options);
+  container.appendChild(fullscreenButton);
+  return container;
+}
+
+function createBottomControls(options: NormaledVideoOptions): HTMLDivElement {
+  const container = document.createElement('div');
+  container.classList.add('bottom-controls');
+  const leftControls = createLeftControls(options);
+  container.appendChild(leftControls);
+  const rightControls = createRightControls(options);
+  container.appendChild(rightControls);
+  return container;
+}
+
+function createVideoControls(options: NormaledVideoOptions): HTMLDivElement {
+  const container = document.createElement('div');
+  container.classList.add('video-controls');
+  const videoProgress = createVideoProgress();
+  container.appendChild(videoProgress);
+  const bottomControls = createBottomControls(options);
+  container.appendChild(bottomControls);
+  return container;
+}
+
+export function createVideoContainer(
+  options: NormaledVideoOptions
+): HTMLDivElement {
+  const container = document.createElement('div');
+  container.id = makeId('container');
+  container.classList.add('video-container');
+  const playbackAnimation = createPlaybackAnimation();
+  container.appendChild(playbackAnimation);
+  const video = document.createElement('video');
+  video.id = makeId('video');
+  video.classList.add('vidoe');
+  container.appendChild(video);
+  const videoControls = createVideoControls(options);
+  container.appendChild(videoControls);
+  return container;
+}
+
+function iconShow(svg: SVGSVGElement, id: string): void {
+  const uses = svg.getElementsByTagNameNS(svgNS, 'use');
+  for (let i = 0; i < uses.length; ++i) {
+    const use = uses[i] as SVGUseElement;
+    if (use.classList.contains(`use-${id}`)) {
+      use.classList.remove('hidden');
+    } else {
+      use.classList.add('hidden');
+    }
+  }
+}
+
+function isPipEnabled(): boolean {
+  return !!document.pictureInPictureEnabled;
+}
+
+export interface VideoShortcut {
+  key: string;
+  ctrl?: boolean;
+  alt?: boolean;
+  shift?: boolean;
+}
+
+type NormaledVideoShortcut = Required<VideoShortcut>;
+
+function descShortcut(shortcut: NormaledVideoShortcut): string {
+  const parts: string[] = [];
+  if (shortcut.ctrl) {
+    parts.push('ctrl');
+  }
+  if (shortcut.alt) {
+    parts.push('alt');
+  }
+  if (shortcut.shift) {
+    parts.push('shift');
+  }
+  parts.push(shortcut.key);
+  return parts.join(' + ');
+}
+
+export interface VideoOptions {
+  shortcuts?: {
+    play?: string | VideoShortcut;
+    mute?: string | VideoShortcut;
+    fullscreen?: string | VideoShortcut;
+    pip?: string | VideoShortcut;
+  };
+}
+
+interface NormaledVideoOptions {
+  shortcuts: {
+    play: NormaledVideoShortcut;
+    mute: NormaledVideoShortcut;
+    fullscreen: NormaledVideoShortcut;
+    pip: NormaledVideoShortcut;
+  };
+}
+
+const DEFAULT_OPTIONS: VideoOptions = {
+  shortcuts: {
+    play: 'k',
+    mute: 'm',
+    fullscreen: 'f',
+    pip: 'p',
+  },
+};
+
+function makeShortcut(shortcut: string | VideoShortcut): NormaledVideoShortcut {
+  if (typeof shortcut === 'string') {
+    return {
+      key: shortcut,
+      ctrl: false,
+      alt: false,
+      shift: false,
+    };
+  } else {
+    return {
+      key: shortcut.key,
+      ctrl: shortcut.ctrl || false,
+      alt: shortcut.alt || false,
+      shift: shortcut.shift || false,
+    };
+  }
+}
+
+function makeOptions(otps: VideoOptions): NormaledVideoOptions {
+  const options = Object.assign({}, DEFAULT_OPTIONS, otps);
+  options.shortcuts = Object.assign(
+    {},
+    DEFAULT_OPTIONS.shortcuts,
+    otps.shortcuts
+  );
+  options.shortcuts.fullscreen = makeShortcut(options.shortcuts.fullscreen!);
+  options.shortcuts.mute = makeShortcut(options.shortcuts.mute!);
+  options.shortcuts.pip = makeShortcut(options.shortcuts.pip!);
+  options.shortcuts.play = makeShortcut(options.shortcuts.play!);
+  return options as NormaledVideoOptions;
+}
+
+export class Video {
+  options: NormaledVideoOptions;
+  container: HTMLDivElement;
+  video: HTMLVideoElement;
+  videoControls: HTMLDivElement;
+  playButton: HTMLButtonElement;
+  timeElapsed: HTMLTimeElement;
+  duration: HTMLTimeElement;
+  progress: HTMLProgressElement;
+  seek: HTMLInputElement;
+  seekTooltip: HTMLDivElement;
+  volume: HTMLInputElement;
+  volumeButton: HTMLButtonElement;
+  volumeIcons: SVGSVGElement;
+  playbackAnimation: HTMLDivElement;
+  fullscreenButton: HTMLButtonElement;
+  fullscreenIcons: SVGSVGElement;
+  pipButton: HTMLButtonElement;
+
+  constructor(opts: VideoOptions = {}) {
+    this.options = makeOptions(opts);
+    this.installSvg();
+    this.container = createVideoContainer(this.options);
+    this.video = this.container.querySelector('video.video')!;
+    this.videoControls = this.container.querySelector('div.video-controls')!;
+    this.playButton = this.container.getElementsByClassName(
+      'play'
+    )[0] as HTMLButtonElement;
+    this.timeElapsed = this.container.querySelector('time.time-elapsed')!;
+    this.duration = this.container.querySelector('time.duration')!;
+    this.progress = this.container.querySelector('progress.progress-bar')!;
+    this.seek = this.container.querySelector('input.seek')!;
+    this.seekTooltip = this.container.querySelector('div.seek-tooltip')!;
+    this.volume = this.container.querySelector('input.volume')!;
+    this.volumeButton = this.container.querySelector('button.volume-button')!;
+    this.volumeIcons = this.volumeButton.querySelector('svg')!;
+    this.playbackAnimation = this.container.querySelector(
+      'div.playback-animation'
+    )!;
+    this.fullscreenButton = this.container.querySelector(
+      'button.fullscreen-button'
+    )!;
+    this.fullscreenIcons = this.fullscreenButton.querySelector('svg')!;
+    this.pipButton = this.container.querySelector('button.pip-button')!;
+    this.playButton.addEventListener('click', this.togglePlay);
+    this.video.addEventListener('play', this.updatePlayButton);
+    this.video.addEventListener('pause', this.updatePlayButton);
+    this.video.addEventListener('loadedmetadata', this.initializeVideo);
+    this.video.addEventListener('timeupdate', this.updateTimeElapsed);
+    this.video.addEventListener('timeupdate', this.updateProgress);
+    this.video.addEventListener('volumechange', this.updateVolumeIcon);
+    this.video.addEventListener('click', this.togglePlay);
+    this.video.addEventListener('click', this.animatePlayback);
+    this.video.addEventListener('mouseenter', this.showControls);
+    this.video.addEventListener('mouseleave', this.hideControls);
+    this.videoControls.addEventListener('mouseenter', this.showControls);
+    this.videoControls.addEventListener('mouseleave', this.hideControls);
+    this.seek.addEventListener('mousemove', this.updateSeekTooltip);
+    this.seek.addEventListener('input', this.skipAhead);
+    this.volume.addEventListener('input', this.updateVolume);
+    this.volumeButton.addEventListener('click', this.toggleMute);
+    this.fullscreenButton.addEventListener('click', this.toggleFullScreen);
+    this.container.addEventListener(
+      'fullscreenchange',
+      this.updateFullscreenButton
+    );
+    this.pipButton.addEventListener('click', this.togglePip);
+    document.addEventListener('keyup', this.keyboardShortcuts);
+  }
+
+  destroy = (): void => {
+    document.removeEventListener('keyup', this.keyboardShortcuts);
+    const url = this.video.src;
+    this.video.src = '';
+    if (url) {
+      URL.revokeObjectURL(url);
+    }
+  };
+
+  updateData = (blob: Blob | MediaSource): void => {
+    const oldUrl = this.video.src;
+    const url = URL.createObjectURL(blob);
+    this.video.src = url;
+    if (oldUrl) {
+      URL.revokeObjectURL(this.video.src);
+    }
+  };
+
+  installSvg = (): void => {
+    const id = makeId('icons');
+    const svg = document.getElementById(id);
+    if (!svg) {
+      document.appendChild(createControlsSvg());
+    }
+  };
+
+  togglePlay = (): void => {
+    if (this.video.paused || this.video.ended) {
+      this.video.play();
+    } else {
+      this.video.pause();
+    }
+  };
+
+  updatePlayButton = (): void => {
+    const svg = this.playButton.getElementsByClassName(
+      'playback-icons'
+    )[0] as SVGSVGElement;
+    const shortcut = descShortcut(this.options.shortcuts.play);
+    if (this.video.paused || this.video.ended) {
+      iconShow(svg, 'play-icon');
+      this.playButton.setAttribute('data-title', `Play (${shortcut})`);
+    } else {
+      iconShow(svg, 'pause');
+      this.playButton.setAttribute('data-title', `Pause (${shortcut})`);
+    }
+  };
+
+  initializeVideo = (): void => {
+    const videoDuration = Math.round(this.video.duration);
+    this.seek.setAttribute('max', `${videoDuration}`);
+    this.progress.setAttribute('max', `${videoDuration}`);
+    const time = formatTime(videoDuration);
+    this.duration.innerText = `${time.minutes}:${time.seconds}`;
+    this.duration.setAttribute('datetime', `${time.minutes}m ${time.seconds}s`);
+  };
+
+  // updateTimeElapsed indicates how far through the video
+  // the current playback is by updating the timeElapsed element
+  updateTimeElapsed = (): void => {
+    const time = formatTime(Math.round(this.video.currentTime));
+    this.timeElapsed.innerText = `${time.minutes}:${time.seconds}`;
+    this.timeElapsed.setAttribute(
+      'datetime',
+      `${time.minutes}m ${time.seconds}s`
+    );
+  };
+
+  // updateProgress indicates how far through the video
+  // the current playback is by updating the progress bar
+  updateProgress = (): void => {
+    this.seek.value = `${Math.floor(this.video.currentTime)}`;
+    this.progress.value = Math.floor(this.video.currentTime);
+  };
+
+  // updateSeekTooltip uses the position of the mouse on the progress bar to
+  // roughly work out what point in the video the user will skip to if
+  // the progress bar is clicked at that point
+  updateSeekTooltip = (event: MouseEvent): void => {
+    const skipTo = Math.round(
+      (event.offsetX / this.seek.clientWidth) *
+        parseInt(this.seek.getAttribute('max') || '0', 10)
+    );
+    this.seek.setAttribute('data-seek', `${skipTo}`);
+    const t = formatTime(skipTo);
+    this.seekTooltip.textContent = `${t.minutes}:${t.seconds}`;
+    const rect = this.video.getBoundingClientRect();
+    this.seekTooltip.style.left = `${event.pageX - rect.left}px`;
+  };
+
+  // skipAhead jumps to a different point in the video when the progress bar
+  // is clicked
+  skipAhead = (): void => {
+    const skipTo = this.seek.dataset.seek
+      ? this.seek.dataset.seek
+      : this.seek.value;
+    this.video.currentTime = Number.parseFloat(skipTo);
+    this.progress.value = Number.parseFloat(skipTo);
+    this.seek.value = skipTo;
+  };
+
+  // updateVolume updates the video's volume
+  // and disables the muted state if active
+  updateVolume = (): void => {
+    if (this.video.muted) {
+      this.video.muted = false;
+    }
+    this.video.volume = Number.parseFloat(this.volume.value);
+  };
+
+  // updateVolumeIcon updates the volume icon so that it correctly reflects
+  // the volume of the video
+  updateVolumeIcon = (): void => {
+    const shortcut = descShortcut(this.options.shortcuts.mute);
+    this.volumeButton.setAttribute('data-title', `Mute (${shortcut})`);
+    if (this.video.muted || this.video.volume === 0) {
+      this.volumeButton.setAttribute('data-title', `Unmute (${shortcut})`);
+      iconShow(this.volumeIcons, 'volume-mute');
+    } else if (this.video.volume > 0 && this.video.volume <= 0.5) {
+      iconShow(this.volumeIcons, 'volume-low');
+    } else {
+      iconShow(this.volumeIcons, 'volume-high');
+    }
+  };
+
+  // toggleMute mutes or unmutes the video when executed
+  // When the video is unmuted, the volume is returned to the value
+  // it was set to before the video was muted
+  toggleMute = (): void => {
+    this.video.muted = !this.video.muted;
+
+    if (this.video.muted) {
+      this.volume.setAttribute('data-volume', this.volume.value);
+      this.volume.value = '0';
+    } else {
+      this.volume.value = this.volume.dataset.volume || `${this.video.volume}`;
+    }
+  };
+
+  // animatePlayback displays an animation when
+  // the video is played or paused
+  animatePlayback = (): void => {
+    this.playbackAnimation.animate(
+      [
+        {
+          opacity: 1,
+          transform: 'scale(1)',
+        },
+        {
+          opacity: 0,
+          transform: 'scale(1.3)',
+        },
+      ],
+      {
+        duration: 500,
+      }
+    );
+  };
+
+  // toggleFullScreen toggles the full screen state of the video
+  // If the browser is currently in fullscreen mode,
+  // then it should exit and vice versa.
+  toggleFullScreen = (): void => {
+    if (document.fullscreenElement) {
+      document.exitFullscreen();
+    } else if ((document as any).webkitFullscreenElement) {
+      // Need this to support Safari
+      (document as any).webkitExitFullscreen();
+    } else if ((this.container as any).webkitRequestFullscreen) {
+      // Need this to support Safari
+      (this.container as any).webkitRequestFullscreen();
+    } else {
+      this.container.requestFullscreen();
+    }
+  };
+
+  isFullscreen = (): boolean => {
+    return (
+      document.fullscreenElement ||
+      (document as any).webkitFullscreenElement ||
+      (this.container as any).webkitRequestFullscreen
+    );
+  };
+
+  // updateFullscreenButton changes the icon of the full screen button
+  // and tooltip to reflect the current full screen state of the video
+  updateFullscreenButton = (): void => {
+    const shortcut = descShortcut(this.options.shortcuts.fullscreen);
+    if (this.isFullscreen()) {
+      this.fullscreenButton.setAttribute(
+        'data-title',
+        `Exit full screen (${shortcut})`
+      );
+      iconShow(this.fullscreenIcons, 'fullscreen-exit');
+    } else {
+      this.fullscreenButton.setAttribute(
+        'data-title',
+        `Full screen (${shortcut})`
+      );
+      iconShow(this.fullscreenIcons, 'fullscreen');
+    }
+  };
+
+  // togglePip toggles Picture-in-Picture mode on the video
+  togglePip = async (): Promise<void> => {
+    try {
+      if (this.video !== document.pictureInPictureElement) {
+        this.pipButton.disabled = true;
+        await this.video.requestPictureInPicture();
+      } else {
+        await document.exitPictureInPicture();
+      }
+    } catch (error) {
+      console.error(error);
+    } finally {
+      this.pipButton.disabled = false;
+    }
+  };
+
+  // hideControls hides the video controls when not in use
+  // if the video is paused, the controls must remain visible
+  hideControls = (): void => {
+    if (this.video.paused) {
+      return;
+    }
+
+    this.videoControls.classList.add('hide');
+  };
+
+  // showControls displays the video controls
+  showControls = (): void => {
+    this.videoControls.classList.remove('hide');
+  };
+
+  // keyboardShortcuts executes the relevant functions for
+  // each supported shortcut key
+  keyboardShortcuts = (event: KeyboardEvent): void => {
+    const { key, ctrlKey, altKey, shiftKey } = event;
+    const { play, mute, fullscreen, pip } = this.options.shortcuts;
+    if (
+      key === play.key &&
+      (play.ctrl === !!ctrlKey ||
+        play.alt === !!altKey ||
+        play.shift === !!shiftKey)
+    ) {
+      this.togglePlay();
+      this.animatePlayback();
+      if (this.video.paused) {
+        this.showControls();
+      } else {
+        setTimeout(() => {
+          this.hideControls();
+        }, 2000);
+      }
+    } else if (
+      key === mute.key &&
+      (mute.ctrl === !!ctrlKey ||
+        mute.alt === !!altKey ||
+        mute.shift === !!shiftKey)
+    ) {
+      this.toggleMute();
+    } else if (
+      key === fullscreen.key &&
+      (fullscreen.ctrl === !!ctrlKey ||
+        fullscreen.alt === !!altKey ||
+        fullscreen.shift === !!shiftKey)
+    ) {
+      this.toggleFullScreen();
+    } else if (
+      key === pip.key &&
+      (pip.ctrl === !!ctrlKey ||
+        pip.alt === !!altKey ||
+        pip.shift === !!shiftKey)
+    ) {
+      this.togglePip();
+    }
+  };
+}
+
+// formatTime takes a time length in seconds and returns the time in
+// minutes and seconds
+function formatTime(timeInSeconds: number) {
+  const result = new Date(timeInSeconds * 1000).toISOString().substr(11, 8);
+
+  return {
+    minutes: result.substr(3, 2),
+    seconds: result.substr(6, 2),
+  };
 }
