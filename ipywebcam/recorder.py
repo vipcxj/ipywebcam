@@ -5,10 +5,10 @@ from abc import ABCMeta, abstractmethod
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from enum import Enum
+from io import BytesIO
+import inspect
 from os import path
-from typing import IO
-from typing import Any as AnyType
-from typing import Callable, Tuple
+from typing import Callable, Tuple, Generic, IO, Any as AnyType
 from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
 from traitlets import Bool, Unicode, CUnicode
 import logging
@@ -21,7 +21,7 @@ from ipywidgets import DOMWidget
 
 from ._frontend import module_name, module_version
 from .common import BaseWidget
-from .webcam import MediaTransformer, WebCamWidget
+from .webcam import MediaTransformer, WebCamWidget, MT
 
 logger = logging.getLogger("ipywebcam")
 
@@ -30,7 +30,38 @@ class RecorderContext:
         self.started = False
         self.stream = stream
         
+FrameTransformerCallback = Callable[[MT], MT | None] | Callable[[MT, "Record"], MT | None] | Callable[[MT, "Record", dict], MT | None]
         
+class RecordFrameTransformer(Generic[MT]):
+    kind: str = "unknown"
+    __context: dict
+    __callback: FrameTransformerCallback
+    __use_record: bool
+    __use_context: bool
+    
+    def __init__(self, callback: FrameTransformerCallback, context: dict | None=None) -> None:
+        super().__init__()
+        self.__callback = callback
+        self.__context = context if context is not None else {}
+        sig = inspect.signature(self.__callback)
+        self.__use_record = len(sig.parameters) > 1
+        self.__use_context = len(sig.parameters) > 2
+        
+    def transform(self, frame: MT, record: "Record") -> MT:
+        if self.__use_context:
+            out = self.__callback(frame, record, self.__context)
+        elif self.__use_record:
+            out = self.__callback(frame, record)
+        else:
+            out = self.__callback(frame)
+        return out if out is not None else frame
+
+class RecordVideoFrameTransformer(RecordFrameTransformer[VideoFrame]):
+    kind: str = 'video'
+    
+class RecordAudioFrameTransformer(RecordFrameTransformer[AudioFrame]):
+    kind: str = 'audio'
+
 class Record:
     file: str | IO
     format: str | None
@@ -118,6 +149,38 @@ class Record:
             self.__container = None
             self.__mode = None
             
+    def read(self, transformers: list[RecordFrameTransformer] | None=None) -> bytes:
+        if transformers is None or len(transformers) == 0:
+            with open(file=self.file, mode='rb') as f:
+                return f.read()
+        else:
+            video_transformers = [transformer for transformer in transformers if transformer.kind == "video"]
+            audio_transformers = [transformer for transformer in transformers if transformer.kind == "audio"]
+            out = BytesIO()
+            with av_open(file=out, mode='w', format=self.format, options=self.options) as out_f:
+                with av_open(file=self.file, mode='r', format=self.format, options=self.options) as input_f:
+                    for stream in input_f.streams:
+                        out_stream = out_f.add_stream(template=stream)
+                        for frame in input_f.decode(stream):
+                            pts = frame.pts
+                            time_base = frame.time_base
+                            if stream.type == "video":
+                                for transformer in video_transformers:
+                                    frame = transformer.transform(frame=frame, record=self)
+                            elif stream.type == "audio":
+                                for transformer in audio_transformers:
+                                    frame = transformer.transform(frame=frame, record=self)
+                            if frame.pts is None:
+                                frame.pts = pts
+                            if frame.time_base is None:
+                                frame.time_base = time_base
+                            for packet in out_stream.encode(frame):
+                                out_f.mux(packet)
+                        for packet in out_stream.encode(None):
+                            out_f.mux(packet)
+            return out.getvalue()
+                
+            
     def relay_tracks_to(self, record: "Record"):
         if not self.__container:
             raise RuntimeError(f"The record is not open: {self.file_path}")
@@ -138,11 +201,15 @@ class RecordConditionContext:
     
 class RecordFactory(metaclass=ABCMeta):
     @abstractmethod
-    def open(self) -> "RecordFactory":
+    def load(self) -> "RecordFactory":
         pass
     
     @abstractmethod
-    def close(self) -> None:
+    def save(self) -> None:
+        pass
+    
+    @abstractmethod
+    def get_record(self, index: int) -> Record | None:
         pass
     
     @abstractmethod
@@ -447,7 +514,7 @@ class FileListFactory(RecordFactory):
                         raise ValueError(f'Unrecognized key {part} in expression {self.template}')
             return res
         
-    def open(self) -> "FileListFactory":
+    def load(self) -> "FileListFactory":
         record_list_path = self._full_path(f'{self.name}.record_list')
         if path.exists(record_list_path):
             with open(record_list_path) as f:
@@ -457,7 +524,7 @@ class FileListFactory(RecordFactory):
             self.__record_list = []
         return self
     
-    def close(self) -> None:
+    def save(self) -> None:
         self._ensure_open()
         if self.flush_when_close:
             self.flush()
@@ -465,6 +532,13 @@ class FileListFactory(RecordFactory):
         with open(record_list_path, 'w') as f:
             f.writelines([f"{record}\n" for record in self.__record_list])
         self.__record_list = None
+        
+    def get_record(self, index: int) -> Record | None:
+        if self.__record_list is None:
+            self.load()
+        if index < 0 or index >= len(self.__record_list):
+            return None
+        return self.__record_list[index]
     
     def flush(self):
         self._ensure_open()
@@ -531,13 +605,20 @@ class SingleFileFactory(RecordFactory):
         self.format = format
         self.options = options
         
-    def open(self) -> "SingleFileFactory":
+    def load(self) -> "SingleFileFactory":
         return self
     
-    def close(self) -> None:
+    def save(self) -> None:
         if self.record:
             self.record.close()
             self.record = None
+            
+    def get_record(self, index: int) -> Record | None:
+        if index != 0:
+            return None
+        if self.record is None:
+            self.record = Record(file=self.file, format=self.format, options=self.format)
+        return self.record
     
     @property
     def name(self) -> str:
@@ -549,9 +630,8 @@ class SingleFileFactory(RecordFactory):
     
     def next_record(self, context_map: dict[MediaStreamTrack, RecordConditionContext], track: MediaStreamTrack) -> Tuple[Record, Record]:
         old = self.record
-        if old is None:
-            self.record = Record(file=self.file, format=self.format, options=self.format)
-        return self.record, old
+        record = self.get_record(0)
+        return record, old
     
         
 class WebCamRecorder:
@@ -596,7 +676,7 @@ class WebCamRecorder:
     async def a_start(self) -> None:
         async with self.lock:
             if not self.recording:
-                self.factory.open()
+                self.factory.load()
                 self.context_map = {}
                 self.recording = True
                 self.widget.add_track_callback(self.on_add_track)
@@ -610,7 +690,7 @@ class WebCamRecorder:
                 self.widget.remove_video_poster(self.video_poster)
                 self.widget.remove_audio_poster(self.audio_poster)
                 self.widget.remove_track_callback(self.on_add_track)
-                self.factory.close()
+                self.factory.save()
                     
     def start(self) -> None:
         asyncio.create_task(self.a_start())
@@ -621,32 +701,50 @@ class WebCamRecorder:
 
 class RecordPlayer(DOMWidget, BaseWidget):
     
-    _model_name = Unicode('RecordPlayerModel').tag(sync=True)
-    _view_name = Unicode('RecordPlayerView').tag(sync=True)
+    _model_name = Unicode('RecorderPlayerModel').tag(sync=True)
+    _view_name = Unicode('RecorderPlayerView').tag(sync=True)
     
     # Define the custom state properties to sync with the front-end
     format = Unicode('mp4', help="The format of the video.").tag(sync=True)
     width = CUnicode(help="Width of the video in pixels.").tag(sync=True)
     height = CUnicode(help="Height of the video in pixels.").tag(sync=True)
     autoplay = Bool(True, help="When true, the video starts when it's displayed").tag(sync=True)
-    loop = Bool(True, help="When true, the video will start from the beginning after finishing").tag(sync=True)
+    loop = Bool(False, help="When true, the video will start from the beginning after finishing").tag(sync=True)
     controls = Bool(True, help="Specifies that video controls should be displayed (such as a play/pause button etc)").tag(sync=True)
+    __base_transformers: list[RecordFrameTransformer]
+    __channel_transformers: dict[str, list[RecordFrameTransformer]]
     
     def __init__(self, recorder: WebCamRecorder, **kwargs):
         super().__init__(logger=logger, **kwargs)
         self.recorder = recorder
-        self.add_answer("fetch_record_meta", self.answer_fetch_record_meta)
-        self.add_answer("fetch_media_data", self.answer_fetch_media_data)
+        self.__base_transformers = []
+        self.__channel_transformers = {}
+        self.add_answer("fetch_meta", self.answer_fetch_meta)
+        self.add_answer("fetch_data", self.answer_fetch_data)
         
-    def _get_media_data(self, index: int) -> bytes | None:
-        pass
+    def get_transformers(self, channel: str | None = None) -> list[RecordFrameTransformer]:
+        if channel is None or channel not in self.__channel_transformers:
+            return self.__base_transformers.copy()
+        transformers = self.__base_transformers.copy()
+        for transformer in self.__channel_transformers[channel]:
+            transformers.append(transformer)
+        return transformers
+        
+    def _get_media_data(self, index: int, channel: str) -> bytes | None:
+        record = self.recorder.factory.get_record(index=index)
+        if not record:
+            return None
+        transformers = self.get_transformers(channel=channel)
+        return record.read(transformers=transformers)
+        
     
-    def answer_fetch_record_meta(self, id: str, cmd: str, args: dict) -> None:
-        pass
+    def answer_fetch_meta(self, id: str, cmd: str, args: dict) -> None:
+        self.answer(cmd=cmd, target_id=id, content={})
     
-    def answer_fetch_media_data(self, id: str, cmd: str, args: dict) -> None:
+    def answer_fetch_data(self, id: str, cmd: str, args: dict) -> None:
         if "index" in args:
             index = args["index"]
-            data = self._get_media_data(index=index)
-            self.answer(cmd=cmd, target_id=id, buffers=[data] if data is not None else None)
+            channel = args.get("channel")
+            data = self._get_media_data(index=index, channel=channel)
+            self.answer(cmd=cmd, target_id=id, content={}, buffers=[data] if data is not None else None)
             

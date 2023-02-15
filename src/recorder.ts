@@ -18,28 +18,15 @@ interface FetchState {
   callbacks: Array<FetchCallback>;
 }
 
-function isMain(video: HTMLVideoElement): boolean {
-  return (
-    video.hasAttribute('__cxj_main__') &&
-    video.getAttribute('__cxj_main__') === 'true'
-  );
-}
-
-function markMain(video: HTMLVideoElement, main: boolean): void {
-  video.setAttribute('__cxj_main__', main ? 'true' : 'false');
-}
-
 export class RecorderPlayerModel extends BaseModel<RecorderMsgTypeMap> {
   cache: LRU<string, Blob> = new LRU({
     max: 6,
   });
   fetchStates: Record<string, FetchState> = {};
+  meta: any;
 
   static model_name = 'RecorderPlayerModel';
   static view_name = 'RecorderPlayerView'; // Set to null if no view
-
-  mainVideo: HTMLVideoElement | undefined = undefined;
-  syncedVideos: HTMLVideoElement[] = [];
 
   defaults(): Backbone.ObjectHash {
     return {
@@ -50,7 +37,7 @@ export class RecorderPlayerModel extends BaseModel<RecorderMsgTypeMap> {
       width: '',
       height: '',
       autoplay: true,
-      loop: true,
+      loop: false,
       controls: true,
     };
   }
@@ -59,18 +46,13 @@ export class RecorderPlayerModel extends BaseModel<RecorderMsgTypeMap> {
     super(...args);
   }
 
-  markMainVideo = (video: HTMLVideoElement): void => {
-    if (this.mainVideo === video) {
-      return;
+  fetchMeta = async (): Promise<any> => {
+    if (this.meta) {
+      return this.meta;
     }
-    const newSyncedVideos = this.syncedVideos.filter((v) => v !== video);
-    if (this.mainVideo) {
-      markMain(this.mainVideo, false);
-      newSyncedVideos.push(this.mainVideo);
-    }
-    markMain(video, true);
-    this.mainVideo = video;
-    this.syncedVideos = newSyncedVideos;
+    const { content } = await this.send_cmd('fetch_meta', {});
+    this.meta = content;
+    return this.meta;
   };
 
   fetchData = async (index: number, channel: string): Promise<Blob> => {
@@ -120,15 +102,18 @@ export class RecorderPlayerView extends DOMWidgetView {
 
   render(): void {
     super.render();
-    if (!this.video) {
-      this.video = new Video();
-      this.el.appendChild(this.video.container);
-    }
-    this.update();
+    this.initVideo();
   }
 
   initVideo = async (): Promise<void> => {
-
+    if (!this.video) {
+      await this.model.fetchMeta();
+      this.video = new Video();
+      this.el.appendChild(this.video.container);
+      const blob = await this.model.fetchData(0, '');
+      this.video.updateData(blob);
+      this.update();
+    }
   };
 
   updateWidth = (): void => {
@@ -152,7 +137,7 @@ export class RecorderPlayerView extends DOMWidgetView {
   updateOtherVideoAttributes = (): void => {
     this.video?.video.setAttribute('loop', this.model.get('loop'));
     this.video?.video.setAttribute('autoplay', this.model.get('autoplay'));
-    this.video?.video.setAttribute('controls', this.model.get('controls'));
+    this.video?.enableControls(this.model.get('controls'));
   };
 
   update(): void {
@@ -161,4 +146,11 @@ export class RecorderPlayerView extends DOMWidgetView {
     this.updateOtherVideoAttributes();
     return super.update();
   }
+
+  remove(): void {
+    this.video?.destroy();
+    this.video = undefined;
+  }
+
+  model: RecorderPlayerModel;
 }

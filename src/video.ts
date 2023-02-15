@@ -1,5 +1,7 @@
 /* eslint-disable @typescript-eslint/no-non-null-assertion */
 
+import '../css/video.css';
+
 const svgNS = 'http://www.w3.org/2000/svg';
 const prefix = 'ipywebcam-video-';
 export function makeId(id: string): string {
@@ -276,17 +278,20 @@ function createVideoControls(options: NormaledVideoOptions): HTMLDivElement {
   return container;
 }
 
+const VIDEO_WORKS = !!document.createElement('video').canPlayType;
+
 export function createVideoContainer(
   options: NormaledVideoOptions
 ): HTMLDivElement {
   const container = document.createElement('div');
   container.id = makeId('container');
+  container.classList.add('ipywebcam');
   container.classList.add('video-container');
   const playbackAnimation = createPlaybackAnimation();
   container.appendChild(playbackAnimation);
   const video = document.createElement('video');
   video.id = makeId('video');
-  video.classList.add('vidoe');
+  video.classList.add('video');
   container.appendChild(video);
   const videoControls = createVideoControls(options);
   container.appendChild(videoControls);
@@ -306,7 +311,7 @@ function iconShow(svg: SVGSVGElement, id: string): void {
 }
 
 function isPipEnabled(): boolean {
-  return !!document.pictureInPictureEnabled;
+  return !!(document as any).pictureInPictureEnabled;
 }
 
 export interface VideoShortcut {
@@ -415,27 +420,47 @@ export class Video {
     this.options = makeOptions(opts);
     this.installSvg();
     this.container = createVideoContainer(this.options);
-    this.video = this.container.querySelector('video.video')!;
-    this.videoControls = this.container.querySelector('div.video-controls')!;
-    this.playButton = this.container.getElementsByClassName(
-      'play'
-    )[0] as HTMLButtonElement;
-    this.timeElapsed = this.container.querySelector('time.time-elapsed')!;
-    this.duration = this.container.querySelector('time.duration')!;
-    this.progress = this.container.querySelector('progress.progress-bar')!;
-    this.seek = this.container.querySelector('input.seek')!;
-    this.seekTooltip = this.container.querySelector('div.seek-tooltip')!;
-    this.volume = this.container.querySelector('input.volume')!;
-    this.volumeButton = this.container.querySelector('button.volume-button')!;
-    this.volumeIcons = this.volumeButton.querySelector('svg')!;
+    this.video = this.container.querySelector(
+      'video.video'
+    )! as HTMLVideoElement;
+    this.videoControls = this.container.querySelector(
+      'div.video-controls'
+    )! as HTMLDivElement;
+    this.playButton = this.container.querySelector(
+      'button.play'
+    )! as HTMLButtonElement;
+    this.timeElapsed = this.container.querySelector(
+      'time.time-elapsed'
+    )! as HTMLTimeElement;
+    this.duration = this.container.querySelector(
+      'time.duration'
+    )! as HTMLTimeElement;
+    this.progress = this.container.querySelector(
+      'progress.progress-bar'
+    )! as HTMLProgressElement;
+    this.seek = this.container.querySelector('input.seek')! as HTMLInputElement;
+    this.seekTooltip = this.container.querySelector(
+      'div.seek-tooltip'
+    )! as HTMLDivElement;
+    this.volume = this.container.querySelector(
+      'input.volume'
+    )! as HTMLInputElement;
+    this.volumeButton = this.container.querySelector(
+      'button.volume-button'
+    )! as HTMLButtonElement;
+    this.volumeIcons = this.volumeButton.querySelector('svg')! as SVGSVGElement;
     this.playbackAnimation = this.container.querySelector(
       'div.playback-animation'
-    )!;
+    )! as HTMLDivElement;
     this.fullscreenButton = this.container.querySelector(
       'button.fullscreen-button'
-    )!;
-    this.fullscreenIcons = this.fullscreenButton.querySelector('svg')!;
-    this.pipButton = this.container.querySelector('button.pip-button')!;
+    )! as HTMLButtonElement;
+    this.fullscreenIcons = this.fullscreenButton.querySelector(
+      'svg'
+    )! as SVGSVGElement;
+    this.pipButton = this.container.querySelector(
+      'button.pip-button'
+    )! as HTMLButtonElement;
     this.playButton.addEventListener('click', this.togglePlay);
     this.video.addEventListener('play', this.updatePlayButton);
     this.video.addEventListener('pause', this.updatePlayButton);
@@ -484,7 +509,7 @@ export class Video {
     const id = makeId('icons');
     const svg = document.getElementById(id);
     if (!svg) {
-      document.appendChild(createControlsSvg());
+      document.body.appendChild(createControlsSvg());
     }
   };
 
@@ -493,6 +518,21 @@ export class Video {
       this.video.play();
     } else {
       this.video.pause();
+    }
+  };
+
+  enableControls = (enabled: boolean): void => {
+    if (enabled) {
+      if (VIDEO_WORKS) {
+        this.video.controls = false;
+        this.videoControls.classList.remove('hidden');
+      } else {
+        this.video.controls = true;
+        this.videoControls.classList.add('hidden');
+      }
+    } else {
+      this.video.controls = false;
+      this.videoControls.classList.add('hidden');
     }
   };
 
@@ -668,11 +708,11 @@ export class Video {
   // togglePip toggles Picture-in-Picture mode on the video
   togglePip = async (): Promise<void> => {
     try {
-      if (this.video !== document.pictureInPictureElement) {
+      if (this.video !== (document as any).pictureInPictureElement) {
         this.pipButton.disabled = true;
-        await this.video.requestPictureInPicture();
+        await (this.video as any).requestPictureInPicture();
       } else {
-        await document.exitPictureInPicture();
+        await (document as any).exitPictureInPicture();
       }
     } catch (error) {
       console.error(error);

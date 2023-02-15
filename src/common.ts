@@ -51,8 +51,7 @@ export class BaseModel<MM extends MsgTypeMap> extends DOMWidgetModel {
         }
         Object.keys(this.messageHandlers).forEach((key) => {
           if (key === cmd) {
-            const handler =
-              this.messageHandlers[key as keyof typeof this.messageHandlers];
+            const handler = this.messageHandlers[key as MM & string];
             if (handler) {
               handler(msg, buffers);
             }
