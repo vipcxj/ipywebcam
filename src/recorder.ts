@@ -4,12 +4,12 @@ import LRU from 'lru-cache';
 import { BaseModel } from './common';
 import { Video } from './video';
 
-type FetchDataArgs = {
-  index: number;
+type ChannelStaleArgs = {
+  channel?: string;
 };
 
 type RecorderMsgTypeMap = {
-  fetch_data: FetchDataArgs;
+  channel_stale: ChannelStaleArgs;
 };
 
 type FetchCallback = (blob: Blob) => void;
@@ -18,12 +18,20 @@ interface FetchState {
   callbacks: Array<FetchCallback>;
 }
 
+type RefreshCallback = (index?: number, channel?: string) => void;
+
+interface RecorderMeta {
+  record_count: number;
+  chanels: string[];
+}
+
 export class RecorderPlayerModel extends BaseModel<RecorderMsgTypeMap> {
   cache: LRU<string, Blob> = new LRU({
     max: 6,
   });
   fetchStates: Record<string, FetchState> = {};
-  meta: any;
+  meta: RecorderMeta;
+  refresh_callbacks: RefreshCallback[] = [];
 
   static model_name = 'RecorderPlayerModel';
   static view_name = 'RecorderPlayerView'; // Set to null if no view
@@ -44,9 +52,40 @@ export class RecorderPlayerModel extends BaseModel<RecorderMsgTypeMap> {
 
   constructor(...args: any[]) {
     super(...args);
+    this.addMessageHandler('channel_stale', (cmdMsg) => {
+      const { args = {} } = cmdMsg;
+      const { channel } = args;
+      if (channel) {
+        for (const key of this.cache.keys()) {
+          if (key.endsWith(`-${channel}`)) {
+            this.cache.delete(key);
+          }
+        }
+      } else {
+        this.cache.clear();
+      }
+      this.triggerRefresh(undefined, channel);
+    });
   }
 
-  fetchMeta = async (): Promise<any> => {
+  addRefereshCallback = (callback: RefreshCallback): void => {
+    this.refresh_callbacks.push(callback);
+  };
+
+  removeRefreshCallback = (callback: RefreshCallback): void => {
+    const index = this.refresh_callbacks.indexOf(callback);
+    if (index >= 0) {
+      this.refresh_callbacks.splice(index, 1);
+    }
+  };
+
+  triggerRefresh = (index?: number, channel?: string): void => {
+    this.refresh_callbacks.forEach((cb) => {
+      cb(index, channel);
+    });
+  };
+
+  fetchMeta = async (): Promise<RecorderMeta> => {
     if (this.meta) {
       return this.meta;
     }
@@ -56,7 +95,7 @@ export class RecorderPlayerModel extends BaseModel<RecorderMsgTypeMap> {
   };
 
   fetchData = async (index: number, channel: string): Promise<Blob> => {
-    const key = `${index}-${channel}`;
+    const key = channel ? `${index}-${channel}` : `${index}`;
     const cached = this.cache.get(key);
     if (cached) {
       return cached;
@@ -97,8 +136,21 @@ export class RecorderPlayerModel extends BaseModel<RecorderMsgTypeMap> {
 }
 
 export class RecorderPlayerView extends DOMWidgetView {
-  inited = false;
   video?: Video;
+  index = -1;
+  channel = '';
+
+  constructor(...args: any[]) {
+    super(...args);
+    this.model.addRefereshCallback((i, c) => {
+      if (
+        this.index === i &&
+        ((!this.channel && !c) || (this.channel && c && this.channel === c))
+      ) {
+        this.load(undefined, undefined, true);
+      }
+    });
+  }
 
   render(): void {
     super.render();
@@ -107,12 +159,47 @@ export class RecorderPlayerView extends DOMWidgetView {
 
   initVideo = async (): Promise<void> => {
     if (!this.video) {
-      await this.model.fetchMeta();
       this.video = new Video();
+      this.video.addSelectHandler((i) => {
+        this.load(i, undefined);
+      });
       this.el.appendChild(this.video.container);
-      const blob = await this.model.fetchData(0, '');
-      this.video.updateData(blob);
+      const { record_count = 0, chanels = [] } = await this.model.fetchMeta();
+      if (record_count > 0) {
+        await this.load(0, chanels.length > 0 ? chanels[0] : '');
+      } else {
+        this.video.updateIndexerSize(0);
+      }
       this.update();
+    }
+  };
+
+  load = async (
+    index?: number,
+    channel?: string,
+    force = false
+  ): Promise<void> => {
+    if (this.video) {
+      if (typeof index === 'undefined') {
+        index = this.index;
+      }
+      if (typeof channel === 'undefined') {
+        channel = this.channel;
+      }
+      if (this.index === index && this.channel === channel && !force) {
+        return;
+      }
+      const { record_count = 0 } = await this.model.fetchMeta();
+      try {
+        this.video.updateIndexerSize(record_count);
+        const blob = await this.model.fetchData(index, channel);
+        this.video.updateData(blob);
+        this.index = index;
+        this.channel = channel;
+        this.video.updateIndexerIndex(this.index);
+      } catch (e) {
+        console.error(e);
+      }
     }
   };
 

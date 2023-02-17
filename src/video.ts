@@ -73,6 +73,18 @@ function createControlsSvg(): SVGSVGElement {
       'M21 19.031v-14.063h-18v14.063h18zM23.016 18.984q0 0.797-0.609 1.406t-1.406 0.609h-18q-0.797 0-1.406-0.609t-0.609-1.406v-14.016q0-0.797 0.609-1.383t1.406-0.586h18q0.797 0 1.406 0.586t0.609 1.383v14.016zM18.984 11.016v6h-7.969v-6h7.969z'
     )
   );
+  defs.appendChild(
+    createSymbol(
+      'left-arrow',
+      'M15.293 3.293 6.586 12l8.707 8.707 1.414-1.414L9.414 12l7.293-7.293-1.414-1.414z'
+    )
+  );
+  defs.appendChild(
+    createSymbol(
+      'right-arrow',
+      'M7.293 4.707 14.586 12l-7.293 7.293 1.414 1.414L17.414 12 8.707 3.293 7.293 4.707z'
+    )
+  );
   return svg;
 }
 
@@ -193,6 +205,9 @@ function createTime(): HTMLDivElement {
   elapsed.classList.add('time-elapsed');
   elapsed.innerText = '00:00';
   container.appendChild(elapsed);
+  const span = document.createElement('span');
+  span.innerText = ' / ';
+  container.appendChild(span);
   const duration = document.createElement('time');
   duration.id = makeId('duration');
   duration.classList.add('duration');
@@ -210,6 +225,14 @@ function createLeftControls(options: NormaledVideoOptions): HTMLDivElement {
   container.appendChild(volumeControls);
   const time = createTime();
   container.appendChild(time);
+  return container;
+}
+
+function createIndexSelector(): HTMLButtonElement {
+  const container = document.createElement('button');
+  container.id = makeId('index-selector');
+  container.classList.add('index-selector');
+  container.setAttribute('data-title', 'Index Select');
   return container;
 }
 
@@ -251,6 +274,8 @@ function createFullscreenButton(
 function createRightControls(options: NormaledVideoOptions): HTMLDivElement {
   const container = document.createElement('div');
   container.classList.add('right-controls');
+  const indexSelector = createIndexSelector();
+  container.appendChild(indexSelector);
   const pipButton = createPipButton(options);
   container.appendChild(pipButton);
   const fullscreenButton = createFullscreenButton(options);
@@ -271,6 +296,7 @@ function createBottomControls(options: NormaledVideoOptions): HTMLDivElement {
 function createVideoControls(options: NormaledVideoOptions): HTMLDivElement {
   const container = document.createElement('div');
   container.classList.add('video-controls');
+  container.tabIndex = 0;
   const videoProgress = createVideoProgress();
   container.appendChild(videoProgress);
   const bottomControls = createBottomControls(options);
@@ -312,6 +338,207 @@ function iconShow(svg: SVGSVGElement, id: string): void {
 
 function isPipEnabled(): boolean {
   return !!(document as any).pictureInPictureEnabled;
+}
+
+type IndexSelectHandler = (index: number) => void;
+
+class IndexSelectorPannel {
+  container: HTMLDivElement;
+  options: HTMLDivElement;
+  pager: HTMLDivElement | undefined;
+  pagerLeft: HTMLButtonElement | undefined;
+  pagerNumber: HTMLDivElement | undefined;
+  pagerRight: HTMLButtonElement | undefined;
+  selectedButton: HTMLButtonElement | undefined;
+  size: number;
+  // 1-start
+  pageIndex: number;
+  pageSize: number;
+  row: number;
+  column: number;
+  hasPager: boolean;
+  optionsWidth: number;
+  optionsHeight: number;
+  clickHandlers: IndexSelectHandler[] = [];
+  realClickHandlers: Array<(evt: MouseEvent) => any> = [];
+
+  constructor(size: number) {
+    this.container = document.createElement('div');
+    this.container.classList.add('selector-panel');
+    this.options = document.createElement('div');
+    this.options.classList.add('selector-options');
+    this.container.appendChild(this.options);
+    this.container.addEventListener('mouseleave', this.hidden);
+    this.updateSize(size);
+  }
+
+  calcLayout = () => {
+    this.row = Math.ceil(this.size / 4);
+    this.column = Math.min(this.size, 4);
+    this.hasPager = this.row > 6;
+    this.pageIndex = 0;
+    this.pageSize = Math.ceil(this.size / 24);
+    this.optionsWidth = this.column * 32 + (this.column - 1) * 6 + 6;
+    this.optionsHeight =
+      Math.min(this.row, 6) * 32 + (Math.min(this.row, 6) - 1) * 6 + 6;
+    const height = this.optionsHeight + 32;
+    this.container.style.width = `${this.optionsWidth}px`;
+    this.container.style.height = `${height}px`;
+    this.container.style.left = `${-this.optionsWidth / 2}px`;
+    this.container.style.top = `${-height}px`;
+  };
+
+  show = () => {
+    this.container.classList.remove('hidden');
+  };
+
+  hidden = () => {
+    this.container.classList.add('hidden');
+  };
+
+  addClickHandler = (handler: IndexSelectHandler): void => {
+    this.clickHandlers.push(handler);
+  };
+
+  setSelectIndex = (index: number): void => {
+    this.container.querySelectorAll('button.selector-option').forEach((e) => {
+      e.classList.remove('selected');
+    });
+    const option = this.container.querySelector(
+      `button.selector-option-${index}`
+    );
+    if (option) {
+      option.classList.add('selected');
+    }
+  };
+
+  createHandler = (index: number): ((evt: MouseEvent) => any) => {
+    return (evt: MouseEvent) => {
+      evt.stopPropagation();
+      try {
+        (this.clickHandlers || []).forEach((handler) => {
+          handler(index);
+        });
+        this.hidden();
+      } catch (e) {
+        console.error(e);
+      }
+    };
+  };
+
+  updatePage = (pageIndex: number) => {
+    if (pageIndex !== this.pageIndex) {
+      this.pageIndex = pageIndex;
+      const optNum =
+        this.pageIndex < this.pageSize ? 24 : 24 - (this.size % 24);
+      let len = this.options.children.length;
+      let idx = 0;
+      if (this.realClickHandlers.length > optNum) {
+        this.realClickHandlers.splice(
+          optNum,
+          this.realClickHandlers.length - optNum
+        );
+      }
+      for (let i = 0; i < len; ++i) {
+        const child = this.options.children.item(i);
+        if (child?.classList.contains('selector-option')) {
+          const button = child as HTMLButtonElement;
+          const dataIdx = idx + (pageIndex - 1) * 24;
+          const newHandler = this.createHandler(dataIdx);
+          if (idx < optNum) {
+            const oldHandler = this.realClickHandlers[idx];
+            button.removeEventListener('click', oldHandler);
+            button.addEventListener('click', newHandler);
+            button.innerText = `${dataIdx}`;
+            ++idx;
+          } else {
+            this.options.removeChild(button);
+            --i;
+            --len;
+          }
+        }
+      }
+      if (idx < optNum) {
+        for (let i = idx; i < optNum; ++i) {
+          const dataIdx = i + (pageIndex - 1) * 24;
+          const option = document.createElement('button');
+          option.innerText = `${dataIdx}`;
+          option.classList.add('selector-option');
+          option.classList.add('no-tooltip');
+          option.classList.add(`selector-option-${dataIdx}`);
+          option.setAttribute('data-index', `${dataIdx}`);
+          const handler = this.createHandler(dataIdx);
+          this.realClickHandlers.push(handler);
+          option.addEventListener('click', handler);
+          this.options.appendChild(option);
+        }
+      }
+      if (this.hasPager) {
+        if (this.pager) {
+          if (this.pagerLeft && this.pageIndex <= 1) {
+            this.pagerLeft.classList.add('disabled');
+          }
+          if (this.pagerNumber) {
+            this.pagerNumber.innerText = `${pageIndex} / ${this.pageSize}`;
+          }
+          if (this.pagerRight && this.pageIndex >= this.pageSize) {
+            this.pagerRight.classList.add('disabled');
+          }
+        } else {
+          this.pager = document.createElement('div');
+          this.pager.classList.add('selector-pager');
+          this.pagerLeft = document.createElement('button');
+          this.pagerLeft.classList.add('page-left');
+          this.pagerLeft.classList.add('no-tooltip');
+          this.pagerLeft.appendChild(
+            createSelectiveUses('page-left', 'page-left')
+          );
+          if (this.pageIndex <= 1) {
+            this.pagerLeft.classList.add('disabled');
+          }
+          this.pagerLeft.addEventListener('click', () => {
+            if (this.pageIndex > 1) {
+              this.updatePage(this.pageIndex - 1);
+            }
+          });
+          this.pager.appendChild(this.pagerLeft);
+          this.pagerNumber = document.createElement('div');
+          this.pagerNumber.innerText = `${pageIndex} / ${this.pageSize}`;
+          this.pager.appendChild(this.pagerNumber);
+          this.pagerRight = document.createElement('button');
+          this.pagerRight.classList.add('page-right');
+          this.pagerRight.classList.add('no-tooltip');
+          this.pagerRight.appendChild(
+            createSelectiveUses('page-right', 'page-right')
+          );
+          if (this.pageIndex >= this.pageSize) {
+            this.pagerRight.classList.add('disabled');
+          }
+          this.pagerRight.addEventListener('click', () => {
+            if (this.pageIndex < this.pageSize) {
+              this.updatePage(this.pageIndex + 1);
+            }
+          });
+          this.pager.appendChild(this.pagerRight);
+          this.container.appendChild(this.pager);
+        }
+      } else {
+        if (this.pager) {
+          this.container.removeChild(this.pager);
+          this.pager = undefined;
+          this.pagerNumber = undefined;
+        }
+      }
+    }
+  };
+
+  updateSize = (size: number) => {
+    if (this.size !== size) {
+      this.size = size;
+      this.calcLayout();
+      this.updatePage(1);
+    }
+  };
 }
 
 export interface VideoShortcut {
@@ -415,6 +642,9 @@ export class Video {
   fullscreenButton: HTMLButtonElement;
   fullscreenIcons: SVGSVGElement;
   pipButton: HTMLButtonElement;
+  indexSelector: HTMLButtonElement;
+  indexSelectorPannel: IndexSelectorPannel | undefined;
+  indexSelectHandlers: IndexSelectHandler[] = [];
 
   constructor(opts: VideoOptions = {}) {
     this.options = makeOptions(opts);
@@ -461,6 +691,9 @@ export class Video {
     this.pipButton = this.container.querySelector(
       'button.pip-button'
     )! as HTMLButtonElement;
+    this.indexSelector = this.container.querySelector(
+      'button.index-selector'
+    )! as HTMLButtonElement;
     this.playButton.addEventListener('click', this.togglePlay);
     this.video.addEventListener('play', this.updatePlayButton);
     this.video.addEventListener('pause', this.updatePlayButton);
@@ -496,10 +729,56 @@ export class Video {
     }
   };
 
+  updateIndexerSize = (size: number): void => {
+    if (!this.indexSelectorPannel) {
+      if (size > 0) {
+        this.indexSelectorPannel = new IndexSelectorPannel(size);
+        this.indexSelectorPannel.hidden();
+        this.indexSelectHandlers.forEach((handler) => {
+          this.indexSelectorPannel?.addClickHandler(handler);
+        });
+        this.indexSelector.parentElement!.appendChild(
+          this.indexSelectorPannel.container
+        );
+        this.indexSelector.addEventListener('click', () => {
+          this.indexSelectorPannel?.show();
+          const index = this.indexSelector.getAttribute('data-index');
+          if (index) {
+            this.indexSelectorPannel?.setSelectIndex(Number.parseInt(index));
+          }
+        });
+        this.indexSelector.classList.remove('hidden');
+      } else {
+        this.indexSelector.classList.add('hidden');
+      }
+    } else {
+      if (size <= 0) {
+        this.indexSelectorPannel.hidden();
+        this.indexSelector.classList.add('hidden');
+      } else {
+        this.indexSelectorPannel.updateSize(size);
+        this.indexSelector.classList.remove('hidden');
+      }
+    }
+  };
+
+  updateIndexerIndex = (index: number): void => {
+    this.indexSelector.innerText = `${index}`;
+    this.indexSelector.setAttribute('data-index', `${index}`);
+  };
+
+  addSelectHandler = (handler: IndexSelectHandler): void => {
+    this.indexSelectHandlers.push(handler);
+    if (this.indexSelectorPannel) {
+      this.indexSelectorPannel.addClickHandler(handler);
+    }
+  };
+
   updateData = (blob: Blob | MediaSource): void => {
     const oldUrl = this.video.src;
     const url = URL.createObjectURL(blob);
     this.video.src = url;
+    this.video.load();
     if (oldUrl) {
       URL.revokeObjectURL(this.video.src);
     }
@@ -551,7 +830,7 @@ export class Video {
   };
 
   initializeVideo = (): void => {
-    const videoDuration = Math.round(this.video.duration);
+    const videoDuration = Math.floor(this.video.duration);
     this.seek.setAttribute('max', `${videoDuration}`);
     this.progress.setAttribute('max', `${videoDuration}`);
     const time = formatTime(videoDuration);
@@ -562,7 +841,7 @@ export class Video {
   // updateTimeElapsed indicates how far through the video
   // the current playback is by updating the timeElapsed element
   updateTimeElapsed = (): void => {
-    const time = formatTime(Math.round(this.video.currentTime));
+    const time = formatTime(Math.floor(this.video.currentTime));
     this.timeElapsed.innerText = `${time.minutes}:${time.seconds}`;
     this.timeElapsed.setAttribute(
       'datetime',
@@ -736,9 +1015,16 @@ export class Video {
     this.videoControls.classList.remove('hide');
   };
 
+  isInFocus = (): boolean => {
+    return document.activeElement?.contains(this.container) || false;
+  };
+
   // keyboardShortcuts executes the relevant functions for
   // each supported shortcut key
   keyboardShortcuts = (event: KeyboardEvent): void => {
+    if (!this.isInFocus()) {
+      return;
+    }
     const { key, ctrlKey, altKey, shiftKey } = event;
     const { play, mute, fullscreen, pip } = this.options.shortcuts;
     if (
