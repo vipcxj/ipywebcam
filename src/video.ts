@@ -1,6 +1,7 @@
 /* eslint-disable @typescript-eslint/no-non-null-assertion */
 
 import '../css/video.css';
+import { arrayInclude } from './utils';
 
 const svgNS = 'http://www.w3.org/2000/svg';
 const prefix = 'ipywebcam-video-';
@@ -232,7 +233,37 @@ function createIndexSelector(): HTMLButtonElement {
   const container = document.createElement('button');
   container.id = makeId('index-selector');
   container.classList.add('index-selector');
-  container.setAttribute('data-title', 'Index Select');
+  container.classList.add('text-button');
+  container.classList.add('hidden');
+  container.setAttribute('data-title', 'Select Index');
+  const text = document.createElement('div');
+  text.classList.add('text');
+  container.appendChild(text);
+  return container;
+}
+
+function createSpeedSelector(): HTMLButtonElement {
+  const container = document.createElement('button');
+  container.id = makeId('speed-selector');
+  container.classList.add('speed-selector');
+  container.classList.add('text-button');
+  container.setAttribute('data-title', 'Select Speed');
+  const text = document.createElement('div');
+  text.classList.add('text');
+  container.appendChild(text);
+  return container;
+}
+
+function createChannelSelector(): HTMLButtonElement {
+  const container = document.createElement('button');
+  container.id = makeId('channel-selector');
+  container.classList.add('channel-selector');
+  container.classList.add('text-button');
+  container.classList.add('hidden');
+  container.setAttribute('data-title', 'Select Channel');
+  const text = document.createElement('div');
+  text.classList.add('text');
+  container.appendChild(text);
   return container;
 }
 
@@ -276,6 +307,10 @@ function createRightControls(options: NormaledVideoOptions): HTMLDivElement {
   container.classList.add('right-controls');
   const indexSelector = createIndexSelector();
   container.appendChild(indexSelector);
+  const channelSelector = createChannelSelector();
+  container.appendChild(channelSelector);
+  const speedSelector = createSpeedSelector();
+  container.appendChild(speedSelector);
   const pipButton = createPipButton(options);
   container.appendChild(pipButton);
   const fullscreenButton = createFullscreenButton(options);
@@ -341,6 +376,163 @@ function isPipEnabled(): boolean {
 }
 
 type IndexSelectHandler = (index: number) => void;
+type ChannelSelectHandler = (channel: string) => void;
+
+interface Option<V = any> {
+  label: string;
+  value: V;
+}
+
+type OptionSelectHandler<V> = (option: Option<V>) => void;
+
+class SelectorPannel<V = any> {
+  container: HTMLDivElement;
+  options: Array<Option<V>> = [];
+  optionButtons: HTMLButtonElement[] = [];
+  clickHandlers: Array<OptionSelectHandler<V>> = [];
+  realClickHandlers: Array<(evt: MouseEvent) => any> = [];
+
+  constructor(options: Array<Option<V>>) {
+    this.container = document.createElement('div');
+    this.container.classList.add('selector-panel');
+    this.container.classList.add('selector-options');
+    this.container.tabIndex = -1;
+    this.container.addEventListener('focusout', (evt) => {
+      if (!this.container.contains(evt.relatedTarget as Element)) {
+        this.hidden();
+      }
+    });
+    this.updateView(options);
+  }
+
+  layout = () => {
+    const { width, height } = this.container.getBoundingClientRect();
+    this.container.style.left = `-${width / 2}px`;
+    this.container.style.top = `-${height}px`;
+  };
+
+  show = () => {
+    this.container.classList.remove('hidden');
+    this.layout();
+    this.container.focus();
+  };
+
+  hidden = () => {
+    this.container.classList.add('hidden');
+  };
+
+  findOption = (options: Array<Option<V>>, label: string): number => {
+    for (let i = 0; i < options.length; ++i) {
+      const option = options[i];
+      if (option.label === label) {
+        return i;
+      }
+    }
+    return -1;
+  };
+
+  updateViewAfterSelect = (label: string): void => {
+    const index = this.findOption(this.options, label);
+    if (index === -1) {
+      return;
+    }
+    this.container.querySelectorAll('button.selector-option').forEach((e) => {
+      e.classList.remove('selected');
+    });
+    const option = this.container.querySelector(
+      `button.selector-option-${index}`
+    );
+    if (option) {
+      option.classList.add('selected');
+    }
+  };
+
+  select = (label: string): void => {
+    const index = this.findOption(this.options, label);
+    if (index !== -1) {
+      const option = this.options[index];
+      (this.clickHandlers || []).forEach((handler) => {
+        handler(option);
+      });
+      this.updateViewAfterSelect(option.label);
+    }
+  };
+
+  install = (
+    element: Element,
+    handler: OptionSelectHandler<V>,
+    initLabel: string | undefined = undefined
+  ): SelectorPannel<V> => {
+    this.hidden();
+    this.addClickHandler(handler);
+    element.appendChild(this.container);
+    element.addEventListener('click', () => {
+      this.show();
+    });
+    if (initLabel) {
+      this.select(initLabel);
+    }
+    return this;
+  };
+
+  addClickHandler = (handler: OptionSelectHandler<V>): void => {
+    this.clickHandlers.push(handler);
+  };
+
+  createHandler = (option: Option<V>): ((evt: MouseEvent) => any) => {
+    return (evt: MouseEvent) => {
+      evt.stopPropagation();
+      try {
+        this.select(option.label);
+        this.hidden();
+      } catch (e) {
+        console.error(e);
+      }
+    };
+  };
+
+  updateView = (options: Array<Option<V>>): void => {
+    const buttons = this.optionButtons;
+    const handlers = this.realClickHandlers;
+    const newLen = options.length;
+    const oldLen = buttons.length;
+    for (let i = 0; i < oldLen; ++i) {
+      const button = buttons[i];
+      const handler = handlers[i];
+      if (i < newLen) {
+        const option = options[i];
+        button.innerText = option.label;
+        button.removeEventListener('click', handler);
+        const newHandler = this.createHandler(option);
+        button.addEventListener('click', newHandler);
+        handlers[i] = newHandler;
+      } else {
+        this.container.removeChild(button);
+      }
+    }
+    if (oldLen > newLen) {
+      buttons.splice(newLen, oldLen - newLen);
+      handlers.splice(newLen, oldLen - newLen);
+    }
+    if (oldLen < newLen) {
+      for (let i = oldLen; i < newLen; ++i) {
+        const option = options[i];
+        const button = document.createElement('button');
+        button.innerText = option.label;
+        button.classList.add('selector-option');
+        button.classList.add('no-tooltip');
+        button.classList.add(`selector-option-${i}`);
+        button.setAttribute('data-index', `${i}`);
+        const handler = this.createHandler(option);
+        button.addEventListener('click', handler);
+        this.container.appendChild(button);
+        buttons.push(button);
+        handlers.push(handler);
+      }
+    }
+    this.options = options;
+  };
+}
 
 class IndexSelectorPannel {
   container: HTMLDivElement;
@@ -364,11 +556,18 @@ class IndexSelectorPannel {
 
   constructor(size: number) {
     this.container = document.createElement('div');
+    this.container.id = makeId('selector-panel');
     this.container.classList.add('selector-panel');
+    this.container.tabIndex = -1;
     this.options = document.createElement('div');
     this.options.classList.add('selector-options');
+    this.options.classList.add('grid');
     this.container.appendChild(this.options);
-    this.container.addEventListener('mouseleave', this.hidden);
+    this.container.addEventListener('focusout', (evt) => {
+      if (!this.container.contains(evt.relatedTarget as Element)) {
+        this.hidden();
+      }
+    });
     this.updateSize(size);
   }
 
@@ -381,7 +580,7 @@ class IndexSelectorPannel {
     this.optionsWidth = this.column * 32 + (this.column - 1) * 6 + 6;
     this.optionsHeight =
       Math.min(this.row, 6) * 32 + (Math.min(this.row, 6) - 1) * 6 + 6;
-    const height = this.optionsHeight + 32;
+    const height = this.optionsHeight + (this.hasPager ? 32 : 0);
     this.container.style.width = `${this.optionsWidth}px`;
     this.container.style.height = `${height}px`;
     this.container.style.left = `${-this.optionsWidth / 2}px`;
@@ -390,6 +589,7 @@ class IndexSelectorPannel {
 
   show = () => {
     this.container.classList.remove('hidden');
+    this.container.focus();
   };
 
   hidden = () => {
@@ -400,7 +600,15 @@ class IndexSelectorPannel {
     this.clickHandlers.push(handler);
   };
 
+  calcPageIndexFromIndex = (index: number): number => {
+    if (index < 0 || index >= this.size) {
+      throw new Error(`Invalid index ${index}`);
+    }
+    return Math.ceil(index / 24);
+  };
+
   setSelectIndex = (index: number): void => {
+    this.updatePage(this.calcPageIndexFromIndex(index));
     this.container.querySelectorAll('button.selector-option').forEach((e) => {
       e.classList.remove('selected');
     });
@@ -429,8 +637,7 @@ class IndexSelectorPannel {
   updatePage = (pageIndex: number) => {
     if (pageIndex !== this.pageIndex) {
       this.pageIndex = pageIndex;
-      const optNum =
-        this.pageIndex < this.pageSize ? 24 : 24 - (this.size % 24);
+      const optNum = this.pageIndex < this.pageSize ? 24 : this.size % 24;
       let len = this.options.children.length;
       let idx = 0;
       if (this.realClickHandlers.length > optNum) {
@@ -444,8 +651,8 @@ class IndexSelectorPannel {
         if (child?.classList.contains('selector-option')) {
           const button = child as HTMLButtonElement;
           const dataIdx = idx + (pageIndex - 1) * 24;
-          const newHandler = this.createHandler(dataIdx);
           if (idx < optNum) {
+            const newHandler = this.createHandler(dataIdx);
             const oldHandler = this.realClickHandlers[idx];
             button.removeEventListener('click', oldHandler);
             button.addEventListener('click', newHandler);
@@ -624,6 +831,19 @@ function makeOptions(otps: VideoOptions): NormaledVideoOptions {
   return options as NormaledVideoOptions;
 }
 
+const SpeedOptions: Array<Option<number>> = [
+  { label: '0.25x', value: 0.25 },
+  { label: '0.5x', value: 0.5 },
+  { label: '0.75x', value: 0.75 },
+  { label: '1.0x', value: 1 },
+  { label: '1.25x', value: 1.25 },
+  { label: '1.5x', value: 1.5 },
+  { label: '1.75x', value: 1.75 },
+  { label: '2.0x', value: 2 },
+  { label: '2.5x', value: 2.5 },
+  { label: '3.0x', value: 3 },
+];
+
 export class Video {
   options: NormaledVideoOptions;
   container: HTMLDivElement;
@@ -645,6 +865,15 @@ export class Video {
   indexSelector: HTMLButtonElement;
   indexSelectorPannel: IndexSelectorPannel | undefined;
   indexSelectHandlers: IndexSelectHandler[] = [];
+  indexerIndex = -1;
+  indexerSize = 0;
+  speedSelector: HTMLButtonElement;
+  speedSelectorPannel: SelectorPannel<number>;
+  speed = 1;
+  channelSelector: HTMLButtonElement;
+  channelSelectHandlers: ChannelSelectHandler[] = [];
+  channelSelectorPannel: SelectorPannel<string>;
+  channel = '';
 
   constructor(opts: VideoOptions = {}) {
     this.options = makeOptions(opts);
@@ -694,8 +923,42 @@ export class Video {
     this.indexSelector = this.container.querySelector(
       'button.index-selector'
     )! as HTMLButtonElement;
+    this.speedSelector = this.container.querySelector(
+      'button.speed-selector'
+    )! as HTMLButtonElement;
+    this.speedSelectorPannel = new SelectorPannel(SpeedOptions).install(
+      this.speedSelector,
+      (option: Option<number>): void => {
+        const text = this.speedSelector.querySelector(
+          'div.text'
+        )! as HTMLDivElement;
+        text.innerText = option.label;
+        this.video.playbackRate = option.value;
+        this.speed = option.value;
+      },
+      '1.0x'
+    );
+    this.channelSelector = this.container.querySelector(
+      'button.channel-selector'
+    )! as HTMLButtonElement;
+    this.channelSelectorPannel = new SelectorPannel([]).install(
+      this.channelSelector,
+      (option) => {
+        const text = this.channelSelector.querySelector(
+          'div.text'
+        )! as HTMLDivElement;
+        text.innerText = option.label;
+        this.channelSelectHandlers.forEach((handler) => {
+          handler(option.value);
+        });
+        this.channel = option.value;
+      }
+    );
     this.playButton.addEventListener('click', this.togglePlay);
     this.video.addEventListener('play', this.updatePlayButton);
+    this.video.addEventListener('play', () => {
+      this.video.playbackRate = this.speed;
+    });
     this.video.addEventListener('pause', this.updatePlayButton);
     this.video.addEventListener('loadedmetadata', this.initializeVideo);
     this.video.addEventListener('timeupdate', this.updateTimeElapsed);
@@ -729,6 +992,27 @@ export class Video {
     }
   };
 
+  updateChannels = (channels: string[] = []): void => {
+    if (channels.length > 0) {
+      this.channelSelector.classList.remove('hidden');
+      const options: Array<Option<string>> = [{ label: 'Default', value: '' }];
+      channels.forEach((channel) => {
+        options.push({ label: channel, value: channel });
+      });
+      this.channelSelectorPannel.updateView(options);
+      if (!arrayInclude(channels, this.channel)) {
+        this.channelSelectorPannel.select('Default');
+      }
+    } else {
+      this.channelSelector.classList.add('hidden');
+      this.channelSelectorPannel.updateView([]);
+    }
+  };
+
+  addChannelSelectHandler = (handler: ChannelSelectHandler): void => {
+    this.channelSelectHandlers.push(handler);
+  };
+
   updateIndexerSize = (size: number): void => {
     if (!this.indexSelectorPannel) {
       if (size > 0) {
@@ -737,9 +1021,7 @@ export class Video {
         this.indexSelectHandlers.forEach((handler) => {
           this.indexSelectorPannel?.addClickHandler(handler);
         });
-        this.indexSelector.parentElement!.appendChild(
-          this.indexSelectorPannel.container
-        );
+        this.indexSelector.appendChild(this.indexSelectorPannel.container);
         this.indexSelector.addEventListener('click', () => {
           this.indexSelectorPannel?.show();
           const index = this.indexSelector.getAttribute('data-index');
@@ -760,14 +1042,20 @@ export class Video {
         this.indexSelector.classList.remove('hidden');
       }
     }
+    this.indexerSize = size;
   };
 
   updateIndexerIndex = (index: number): void => {
-    this.indexSelector.innerText = `${index}`;
+    const text = this.indexSelector.querySelector(
+      'div.text'
+    )! as HTMLDivElement;
+    text.innerText = `${index}`;
     this.indexSelector.setAttribute('data-index', `${index}`);
+    this.indexSelectorPannel?.setSelectIndex(index);
+    this.indexerIndex = index;
   };
 
-  addSelectHandler = (handler: IndexSelectHandler): void => {
+  addIndexSelectHandler = (handler: IndexSelectHandler): void => {
     this.indexSelectHandlers.push(handler);
     if (this.indexSelectorPannel) {
       this.indexSelectorPannel.addClickHandler(handler);
@@ -778,9 +1066,9 @@ export class Video {
     const oldUrl = this.video.src;
     const url = URL.createObjectURL(blob);
     this.video.src = url;
-    this.video.load();
     if (oldUrl) {
-      URL.revokeObjectURL(this.video.src);
+      this.video.load();
+      URL.revokeObjectURL(oldUrl);
     }
   };
 

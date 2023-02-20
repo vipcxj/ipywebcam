@@ -47,6 +47,7 @@ export class RecorderPlayerModel extends BaseModel<RecorderMsgTypeMap> {
       autoplay: true,
       loop: false,
       controls: true,
+      autonext: true,
     };
   }
 
@@ -111,7 +112,7 @@ export class RecorderPlayerModel extends BaseModel<RecorderMsgTypeMap> {
         channel,
       });
       const { format = this.get('format') } = content;
-      const blob = new Blob(buffers, { type: format });
+      const blob = new Blob(buffers, { type: `video/${format}` });
       this.cache.set(key, blob);
       fetchState.callbacks.forEach((callback) => callback(blob));
       delete this.fetchStates[key];
@@ -138,7 +139,9 @@ export class RecorderPlayerModel extends BaseModel<RecorderMsgTypeMap> {
 export class RecorderPlayerView extends DOMWidgetView {
   video?: Video;
   index = -1;
+  indexSize = 0;
   channel = '';
+  channels: string[] = [];
 
   constructor(...args: any[]) {
     super(...args);
@@ -157,20 +160,36 @@ export class RecorderPlayerView extends DOMWidgetView {
     this.initVideo();
   }
 
+  fetchMeta = async (): Promise<void> => {
+    const { record_count = 0, chanels = [] } = await this.model.fetchMeta();
+    this.indexSize = record_count;
+    this.channels = chanels;
+  };
+
   initVideo = async (): Promise<void> => {
     if (!this.video) {
       this.video = new Video();
-      this.video.addSelectHandler((i) => {
+      this.video.addIndexSelectHandler((i) => {
         this.load(i, undefined);
       });
+      this.video.addChannelSelectHandler((channel) => {
+        this.load(undefined, channel);
+      });
+      this.video.video.addEventListener('ended', async () => {
+        const autonext = this.model.get('autonext');
+        const loop = this.model.get('loop');
+        if (autonext) {
+          if (this.index < this.indexSize - 1) {
+            this.load(this.index + 1, undefined);
+          } else if (this.index === this.indexSize - 1 && loop) {
+            this.load(0, undefined);
+          }
+        }
+      });
       this.el.appendChild(this.video.container);
-      const { record_count = 0, chanels = [] } = await this.model.fetchMeta();
-      if (record_count > 0) {
-        await this.load(0, chanels.length > 0 ? chanels[0] : '');
-      } else {
-        this.video.updateIndexerSize(0);
-      }
       this.update();
+      await this.fetchMeta();
+      await this.load(0, this.channels.length > 0 ? this.channels[0] : '');
     }
   };
 
@@ -189,14 +208,17 @@ export class RecorderPlayerView extends DOMWidgetView {
       if (this.index === index && this.channel === channel && !force) {
         return;
       }
-      const { record_count = 0 } = await this.model.fetchMeta();
+      await this.fetchMeta();
       try {
-        this.video.updateIndexerSize(record_count);
-        const blob = await this.model.fetchData(index, channel);
-        this.video.updateData(blob);
+        if (this.indexSize > 0) {
+          const blob = await this.model.fetchData(index, channel);
+          this.video.updateData(blob);
+        }
         this.index = index;
         this.channel = channel;
+        this.video.updateIndexerSize(this.indexSize);
         this.video.updateIndexerIndex(this.index);
+        this.video.updateChannels(this.channels);
       } catch (e) {
         console.error(e);
       }
@@ -222,8 +244,15 @@ export class RecorderPlayerView extends DOMWidgetView {
   };
 
   updateOtherVideoAttributes = (): void => {
-    this.video?.video.setAttribute('loop', this.model.get('loop'));
-    this.video?.video.setAttribute('autoplay', this.model.get('autoplay'));
+    const video = this.video?.video;
+    if (video) {
+      video.autoplay = this.model.get('autoplay') ? true : false;
+      if (this.model.get('autonext')) {
+        video.loop = false;
+      } else {
+        video.loop = this.model.get('loop') ? true : false;
+      }
+    }
     this.video?.enableControls(this.model.get('controls'));
   };
 

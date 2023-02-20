@@ -821,6 +821,7 @@ class RecordPlayer(DOMWidget, BaseWidget):
     height = CUnicode(help="Height of the video in pixels.").tag(sync=True)
     autoplay = Bool(True, help="When true, the video starts when it's displayed").tag(sync=True)
     loop = Bool(False, help="When true, the video will start from the beginning after finishing").tag(sync=True)
+    autonext = Bool(True, help="When true, the video will start next after finishing").tag(sync=True)
     controls = Bool(True, help="Specifies that video controls should be displayed (such as a play/pause button etc)").tag(sync=True)
     __base_transformers: list[RecordFrameTransformer]
     __channel_transformers: dict[str, list[RecordFrameTransformer]]

@@ -162,9 +162,12 @@
 }
 
 .ipywebcam.video-container .index-selector {
-  color: #fff;
   min-width: 26px;
   height: 26px;
+}
+
+.ipywebcam.video-container .text-button {
+  color: #fff;
 }
 
 .ipywebcam.video-container .selector-panel {
@@ -177,7 +180,13 @@
 
 .ipywebcam.video-container .selector-options {
   display: flex;
+  flex-wrap: nowrap;
+  flex-direction: column;
+}
+
+.ipywebcam.video-container .selector-options.grid {
   flex-wrap: wrap;
+  flex-direction: row;
 }
 
 .ipywebcam.video-container .selector-pager {
@@ -204,8 +213,16 @@
   pointer-events: auto;
 }
 
+.ipywebcam.video-container button.selector-option .text {
+  display: inline-block;
+}
+
 .ipywebcam.video-container button.selector-option:hover {
   background: rgba(120, 120, 120, 0.9);
+}
+
+.ipywebcam.video-container button.selector-option.selected {
+  background: rgba(81, 81, 81, 0.9);
 }
 
 .ipywebcam.video-container .pip-button svg {
