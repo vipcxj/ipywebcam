@@ -30,7 +30,7 @@ export class RecorderPlayerModel extends BaseModel<RecorderMsgTypeMap> {
     max: 6,
   });
   fetchStates: Record<string, FetchState> = {};
-  meta: RecorderMeta;
+  meta: RecorderMeta | undefined;
   refresh_callbacks: RefreshCallback[] = [];
 
   static model_name = 'RecorderPlayerModel';
@@ -65,6 +65,7 @@ export class RecorderPlayerModel extends BaseModel<RecorderMsgTypeMap> {
       } else {
         this.cache.clear();
       }
+      this.meta = undefined;
       this.triggerRefresh(undefined, channel);
     });
   }
@@ -92,7 +93,8 @@ export class RecorderPlayerModel extends BaseModel<RecorderMsgTypeMap> {
     }
     const { content } = await this.send_cmd('fetch_meta', {});
     this.meta = content;
-    return this.meta;
+    // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
+    return this.meta!;
   };
 
   fetchData = async (index: number, channel: string): Promise<Blob> => {
@@ -136,12 +138,16 @@ export class RecorderPlayerModel extends BaseModel<RecorderMsgTypeMap> {
   };
 }
 
+type LoadStateCallback = (loading: boolean) => void;
+
 export class RecorderPlayerView extends DOMWidgetView {
   video?: Video;
   index = -1;
   indexSize = 0;
   channel = '';
   channels: string[] = [];
+  private loading = false;
+  private loadStateOnceCallbacks: LoadStateCallback[] = [];
 
   constructor(...args: any[]) {
     super(...args);
@@ -154,6 +160,18 @@ export class RecorderPlayerView extends DOMWidgetView {
       }
     });
   }
+
+  addLoadStateOnceCallback = (callback: LoadStateCallback): void => {
+    this.loadStateOnceCallbacks.push(callback);
+  };
+
+  setLoading = (loading: boolean): void => {
+    if (this.loading !== loading) {
+      this.loading = loading;
+      this.loadStateOnceCallbacks.forEach((callback) => callback(loading));
+      this.loadStateOnceCallbacks.splice(0, this.loadStateOnceCallbacks.length);
+    }
+  };
 
   render(): void {
     super.render();
@@ -173,7 +191,7 @@ export class RecorderPlayerView extends DOMWidgetView {
         this.load(i, undefined);
       });
       this.video.addChannelSelectHandler((channel) => {
-        this.load(undefined, channel);
+        this.load(undefined, channel, false, true);
       });
       this.video.video.addEventListener('ended', async () => {
         const autonext = this.model.get('autonext');
@@ -189,14 +207,29 @@ export class RecorderPlayerView extends DOMWidgetView {
       this.el.appendChild(this.video.container);
       this.update();
       await this.fetchMeta();
-      await this.load(0, this.channels.length > 0 ? this.channels[0] : '');
+      await this.load(0, '');
     }
+  };
+
+  waitForLoading = async (loading: boolean): Promise<void> => {
+    return new Promise((resolve) => {
+      if (this.loading === loading) {
+        resolve();
+      } else {
+        this.addLoadStateOnceCallback((state) => {
+          if (state === loading) {
+            resolve();
+          }
+        });
+      }
+    });
   };
 
   load = async (
     index?: number,
     channel?: string,
-    force = false
+    force = false,
+    resumeTime = false
   ): Promise<void> => {
     if (this.video) {
       if (typeof index === 'undefined') {
@@ -208,11 +241,13 @@ export class RecorderPlayerView extends DOMWidgetView {
       if (this.index === index && this.channel === channel && !force) {
         return;
       }
+      await this.waitForLoading(false);
+      this.setLoading(true);
       await this.fetchMeta();
       try {
         if (this.indexSize > 0) {
           const blob = await this.model.fetchData(index, channel);
-          this.video.updateData(blob);
+          this.video.updateData(blob, resumeTime);
         }
         this.index = index;
         this.channel = channel;
@@ -221,6 +256,8 @@ export class RecorderPlayerView extends DOMWidgetView {
         this.video.updateChannels(this.channels);
       } catch (e) {
         console.error(e);
+      } finally {
+        this.setLoading(false);
       }
     }
   };

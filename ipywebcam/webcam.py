@@ -593,9 +593,7 @@ class WebCamWidget(DOMWidget, BaseWidget, WithMediaTransformers):
         Args:
             transformer (MediaTransformer[VideoFrame]): The transformer instance return by add_video_transformer
         """        
-        new_transformers = self.video_transformers.copy()
-        new_transformers.remove(transformer)
-        self.video_transformers = new_transformers
+        self.video_transformers = [t for t in self.video_transformers if t != transformer]
         
     def add_video_poster(self, callback: Callable[[VideoFrame, dict, MediaStreamTrack], None]) -> MediaTransformer[VideoFrame]:
         """Add a video frame post processor
@@ -621,9 +619,7 @@ class WebCamWidget(DOMWidget, BaseWidget, WithMediaTransformers):
         Args:
             poster (MediaTransformer[VideoFrame]): The poster instance return by add_video_poster
         """        
-        new_posters = self.video_posters.copy()
-        new_posters.remove(poster)
-        self.video_posters = new_posters
+        self.video_posters = [p for p in self.video_posters if p != poster]
         
     def add_audio_transformer(self, callback: Callable[[AudioFrame, dict, MediaStreamTrack], Union[AudioFrame, Awaitable[AudioFrame]]]) -> MediaTransformer[AudioFrame]:
         """Add a audio frame processor
@@ -648,9 +644,7 @@ class WebCamWidget(DOMWidget, BaseWidget, WithMediaTransformers):
         Args:
             transformer (MediaTransformer[VideoFrame]): The transformer instance return by add_video_transformer
         """        
-        new_transformers = self.audio_transformers.copy()
-        new_transformers.remove(transformer)
-        self.audio_transformers = new_transformers
+        self.audio_transformers = [t for t in self.audio_transformers if t != transformer]
         
     def add_audio_poster(self, callback: Callable[[AudioFrame, dict, MediaStreamTrack], None]) -> MediaTransformer[AudioFrame]:
         """Add a audio frame post processor
@@ -676,9 +670,7 @@ class WebCamWidget(DOMWidget, BaseWidget, WithMediaTransformers):
         Args:
             poster (MediaTransformer[AudioFrame]): The poster instance return by add_audio_poster
         """        
-        new_posters = self.audio_posters.copy()
-        new_posters.remove(poster)
-        self.audio_posters = new_posters
+        self.audio_posters = [p for p in self.audio_posters if p != poster]
         
         
     def add_track_callback(self, callback: OnTrackCallback) -> None:
@@ -696,7 +688,8 @@ class WebCamWidget(DOMWidget, BaseWidget, WithMediaTransformers):
         
     def remove_track_callback(self, callback: OnTrackCallback) -> None:
         with self.lock:
-            self.track_callbacks.remove(callback)
+            if callback in self.track_callbacks:
+                self.track_callbacks.remove(callback)
         
     
     def get_ice_servers(self) -> list[RTCIceServer]:

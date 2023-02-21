@@ -200,9 +200,13 @@
   height: 20px;
 }
 
-.ipywebcam.video-container .selector-pager svg.disabled {
-  fill: #aaa;
-  stroke: #aaa;
+.ipywebcam.video-container .selector-pager button.disabled svg {
+  fill: #999;
+  stroke: #999;
+}
+
+.ipywebcam.video-container .selector-pager button {
+  pointer-events: auto;
 }
 
 .ipywebcam.video-container button.selector-option {

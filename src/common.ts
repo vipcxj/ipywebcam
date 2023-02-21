@@ -46,7 +46,7 @@ export class BaseModel<MM extends MsgTypeMap> extends DOMWidgetModel {
         buffers?: ArrayBuffer[] | ArrayBufferView[]
       ) => {
         const { id, cmd } = msg;
-        if (id !== this.message_id) {
+        if (id && id !== this.message_id) {
           return;
         }
         Object.keys(this.messageHandlers).forEach((key) => {

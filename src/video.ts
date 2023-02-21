@@ -386,6 +386,7 @@ interface Option<V = any> {
 type OptionSelectHandler<V> = (option: Option<V>) => void;
 
 class SelectorPannel<V = any> {
+  trigger: Element | undefined;
   container: HTMLDivElement;
   options: Array<Option<V>> = [];
   optionButtons: HTMLButtonElement[] = [];
@@ -398,7 +399,10 @@ class SelectorPannel<V = any> {
     this.container.classList.add('selector-options');
     this.container.tabIndex = -1;
     this.container.addEventListener('focusout', (evt) => {
-      if (!this.container.contains(evt.relatedTarget as Element)) {
+      if (
+        !this.container.contains(evt.relatedTarget as Element) &&
+        evt.relatedTarget !== this.trigger
+      ) {
         this.hidden();
       }
     });
@@ -419,6 +423,14 @@ class SelectorPannel<V = any> {
 
   hidden = () => {
     this.container.classList.add('hidden');
+  };
+
+  toggle = () => {
+    if (this.container.classList.contains('hidden')) {
+      this.show();
+    } else {
+      this.hidden();
+    }
   };
 
   findOption = (options: Array<Option<V>>, label: string): number => {
@@ -463,11 +475,12 @@ class SelectorPannel<V = any> {
     handler: OptionSelectHandler<V>,
     initLabel: string | undefined = undefined
   ): SelectorPannel<V> => {
+    this.trigger = element;
     this.hidden();
     this.addClickHandler(handler);
     element.appendChild(this.container);
     element.addEventListener('click', () => {
-      this.show();
+      this.toggle();
     });
     if (initLabel) {
       this.select(initLabel);
@@ -507,6 +520,7 @@ class SelectorPannel<V = any> {
         button.addEventListener('click', newHandler);
         handlers[i] = newHandler;
       } else {
+        button.removeEventListener('click', handler);
         this.container.removeChild(button);
       }
     }
@@ -535,17 +549,18 @@ class SelectorPannel<V = any> {
 }
 
 class IndexSelectorPannel {
+  trigger: Element | undefined;
   container: HTMLDivElement;
   options: HTMLDivElement;
   pager: HTMLDivElement | undefined;
   pagerLeft: HTMLButtonElement | undefined;
   pagerNumber: HTMLDivElement | undefined;
   pagerRight: HTMLButtonElement | undefined;
-  selectedButton: HTMLButtonElement | undefined;
   size: number;
   // 1-start
   pageIndex: number;
   pageSize: number;
+  selected: number;
   row: number;
   column: number;
   hasPager: boolean;
@@ -564,22 +579,26 @@ class IndexSelectorPannel {
     this.options.classList.add('grid');
     this.container.appendChild(this.options);
     this.container.addEventListener('focusout', (evt) => {
-      if (!this.container.contains(evt.relatedTarget as Element)) {
+      if (
+        !this.container.contains(evt.relatedTarget as Element) &&
+        evt.relatedTarget !== this.trigger
+      ) {
         this.hidden();
       }
     });
     this.updateSize(size);
   }
 
-  calcLayout = () => {
+  calcLayout = (pageIndex: number) => {
     this.row = Math.ceil(this.size / 4);
     this.column = Math.min(this.size, 4);
     this.hasPager = this.row > 6;
-    this.pageIndex = 0;
+    this.pageIndex = pageIndex;
     this.pageSize = Math.ceil(this.size / 24);
+    const curRow =
+      this.pageIndex < this.pageSize ? 6 : this.row - (this.pageIndex - 1) * 6;
     this.optionsWidth = this.column * 32 + (this.column - 1) * 6 + 6;
-    this.optionsHeight =
-      Math.min(this.row, 6) * 32 + (Math.min(this.row, 6) - 1) * 6 + 6;
+    this.optionsHeight = curRow * 32 + (curRow - 1) * 6 + 6;
     const height = this.optionsHeight + (this.hasPager ? 32 : 0);
     this.container.style.width = `${this.optionsWidth}px`;
     this.container.style.height = `${height}px`;
@@ -596,6 +615,14 @@ class IndexSelectorPannel {
     this.container.classList.add('hidden');
   };
 
+  toggle = () => {
+    if (this.container.classList.contains('hidden')) {
+      this.show();
+    } else {
+      this.hidden();
+    }
+  };
+
   addClickHandler = (handler: IndexSelectHandler): void => {
     this.clickHandlers.push(handler);
   };
@@ -604,11 +631,12 @@ class IndexSelectorPannel {
     if (index < 0 || index >= this.size) {
       throw new Error(`Invalid index ${index}`);
     }
-    return Math.ceil(index / 24);
+    return Math.ceil((index + 1) / 24);
   };
 
   setSelectIndex = (index: number): void => {
     this.updatePage(this.calcPageIndexFromIndex(index));
+    this.selected = index;
     this.container.querySelectorAll('button.selector-option').forEach((e) => {
       e.classList.remove('selected');
     });
@@ -636,34 +664,45 @@ class IndexSelectorPannel {
 
   updatePage = (pageIndex: number) => {
     if (pageIndex !== this.pageIndex) {
-      this.pageIndex = pageIndex;
+      this.calcLayout(pageIndex);
       const optNum = this.pageIndex < this.pageSize ? 24 : this.size % 24;
       let len = this.options.children.length;
       let idx = 0;
-      if (this.realClickHandlers.length > optNum) {
-        this.realClickHandlers.splice(
-          optNum,
-          this.realClickHandlers.length - optNum
-        );
-      }
       for (let i = 0; i < len; ++i) {
         const child = this.options.children.item(i);
         if (child?.classList.contains('selector-option')) {
           const button = child as HTMLButtonElement;
+          const oldHandler = this.realClickHandlers[idx];
           const dataIdx = idx + (pageIndex - 1) * 24;
           if (idx < optNum) {
-            const newHandler = this.createHandler(dataIdx);
-            const oldHandler = this.realClickHandlers[idx];
+            const newHandler = (this.realClickHandlers[idx] =
+              this.createHandler(dataIdx));
             button.removeEventListener('click', oldHandler);
             button.addEventListener('click', newHandler);
             button.innerText = `${dataIdx}`;
+            button.className = '';
+            button.classList.add('selector-option');
+            button.classList.add('no-tooltip');
+            button.classList.add(`selector-option-${dataIdx}`);
+            if (dataIdx === this.selected) {
+              button.classList.add('selected');
+            } else {
+              button.classList.remove('selected');
+            }
             ++idx;
           } else {
+            button.removeEventListener('click', oldHandler);
             this.options.removeChild(button);
             --i;
             --len;
           }
         }
+      }
+      if (this.realClickHandlers.length > optNum) {
+        this.realClickHandlers.splice(
+          optNum,
+          this.realClickHandlers.length - optNum
+        );
       }
       if (idx < optNum) {
         for (let i = idx; i < optNum; ++i) {
@@ -673,6 +712,11 @@ class IndexSelectorPannel {
           option.classList.add('selector-option');
           option.classList.add('no-tooltip');
           option.classList.add(`selector-option-${dataIdx}`);
+          if (dataIdx === this.selected) {
+            option.classList.add('selected');
+          } else {
+            option.classList.remove('selected');
+          }
           option.setAttribute('data-index', `${dataIdx}`);
           const handler = this.createHandler(dataIdx);
           this.realClickHandlers.push(handler);
@@ -684,12 +728,16 @@ class IndexSelectorPannel {
         if (this.pager) {
           if (this.pagerLeft && this.pageIndex <= 1) {
             this.pagerLeft.classList.add('disabled');
+          } else if (this.pagerLeft) {
+            this.pagerLeft.classList.remove('disabled');
           }
           if (this.pagerNumber) {
             this.pagerNumber.innerText = `${pageIndex} / ${this.pageSize}`;
           }
           if (this.pagerRight && this.pageIndex >= this.pageSize) {
             this.pagerRight.classList.add('disabled');
+          } else if (this.pagerRight) {
+            this.pagerRight.classList.remove('disabled');
           }
         } else {
           this.pager = document.createElement('div');
@@ -697,13 +745,15 @@ class IndexSelectorPannel {
           this.pagerLeft = document.createElement('button');
           this.pagerLeft.classList.add('page-left');
           this.pagerLeft.classList.add('no-tooltip');
+          this.pagerLeft.tabIndex = -1;
           this.pagerLeft.appendChild(
-            createSelectiveUses('page-left', 'page-left')
+            createSelectiveUses('left-arrow', 'left-arrow')
           );
           if (this.pageIndex <= 1) {
             this.pagerLeft.classList.add('disabled');
           }
-          this.pagerLeft.addEventListener('click', () => {
+          this.pagerLeft.addEventListener('click', (evt) => {
+            evt.stopPropagation();
             if (this.pageIndex > 1) {
               this.updatePage(this.pageIndex - 1);
             }
@@ -715,13 +765,15 @@ class IndexSelectorPannel {
           this.pagerRight = document.createElement('button');
           this.pagerRight.classList.add('page-right');
           this.pagerRight.classList.add('no-tooltip');
+          this.pagerRight.tabIndex = -1;
           this.pagerRight.appendChild(
-            createSelectiveUses('page-right', 'page-right')
+            createSelectiveUses('right-arrow', 'right-arrow')
           );
           if (this.pageIndex >= this.pageSize) {
             this.pagerRight.classList.add('disabled');
           }
-          this.pagerRight.addEventListener('click', () => {
+          this.pagerRight.addEventListener('click', (evt) => {
+            evt.stopPropagation();
             if (this.pageIndex < this.pageSize) {
               this.updatePage(this.pageIndex + 1);
             }
@@ -742,7 +794,7 @@ class IndexSelectorPannel {
   updateSize = (size: number) => {
     if (this.size !== size) {
       this.size = size;
-      this.calcLayout();
+      this.pageIndex = 0;
       this.updatePage(1);
     }
   };
@@ -874,6 +926,7 @@ export class Video {
   channelSelectHandlers: ChannelSelectHandler[] = [];
   channelSelectorPannel: SelectorPannel<string>;
   channel = '';
+  currentTime: number | undefined;
 
   constructor(opts: VideoOptions = {}) {
     this.options = makeOptions(opts);
@@ -955,12 +1008,14 @@ export class Video {
       }
     );
     this.playButton.addEventListener('click', this.togglePlay);
+    this.video.addEventListener('play', this.updateCurrentTime);
     this.video.addEventListener('play', this.updatePlayButton);
     this.video.addEventListener('play', () => {
       this.video.playbackRate = this.speed;
     });
     this.video.addEventListener('pause', this.updatePlayButton);
     this.video.addEventListener('loadedmetadata', this.initializeVideo);
+    this.video.addEventListener('timeupdate', this.updateCurrentTime);
     this.video.addEventListener('timeupdate', this.updateTimeElapsed);
     this.video.addEventListener('timeupdate', this.updateProgress);
     this.video.addEventListener('volumechange', this.updateVolumeIcon);
@@ -1021,9 +1076,10 @@ export class Video {
         this.indexSelectHandlers.forEach((handler) => {
           this.indexSelectorPannel?.addClickHandler(handler);
         });
+        this.indexSelectorPannel.trigger = this.indexSelector;
         this.indexSelector.appendChild(this.indexSelectorPannel.container);
         this.indexSelector.addEventListener('click', () => {
-          this.indexSelectorPannel?.show();
+          this.indexSelectorPannel?.toggle();
           const index = this.indexSelector.getAttribute('data-index');
           if (index) {
             this.indexSelectorPannel?.setSelectIndex(Number.parseInt(index));
@@ -1062,12 +1118,15 @@ export class Video {
     }
   };
 
-  updateData = (blob: Blob | MediaSource): void => {
+  updateData = (blob: Blob | MediaSource, resumeTime = false): void => {
     const oldUrl = this.video.src;
     const url = URL.createObjectURL(blob);
     this.video.src = url;
     if (oldUrl) {
       this.video.load();
+      if (resumeTime && this.currentTime) {
+        this.video.currentTime = this.currentTime;
+      }
       URL.revokeObjectURL(oldUrl);
     }
   };
@@ -1124,6 +1183,10 @@ export class Video {
     const time = formatTime(videoDuration);
     this.duration.innerText = `${time.minutes}:${time.seconds}`;
     this.duration.setAttribute('datetime', `${time.minutes}m ${time.seconds}s`);
+  };
+
+  updateCurrentTime = (): void => {
+    this.currentTime = this.video.currentTime;
   };
 
   // updateTimeElapsed indicates how far through the video

@@ -50,13 +50,24 @@ class RecordFrameTransformer(Generic[MT]):
         self.__use_context = len(sig.parameters) > 2
         
     def transform(self, frame: MT, record: "Record") -> MT:
-        if self.__use_context:
-            out = self.__callback(frame, record, self.__context)
-        elif self.__use_record:
-            out = self.__callback(frame, record)
-        else:
-            out = self.__callback(frame)
-        return out if out is not None else frame
+        out = None
+        pts = frame.pts
+        time_base = frame.time_base
+        try:
+            if self.__use_context:
+                out = self.__callback(frame, record, self.__context)
+            elif self.__use_record:
+                out = self.__callback(frame, record)
+            else:
+                out = self.__callback(frame)
+        except Exception as e:
+            logger.exception(e)
+        out = out if out is not None else frame
+        if out.pts is None:
+            out.pts = pts
+        if out.time_base is None:
+            out.time_base = time_base
+        return out
     
     def clear(self) -> None:
         self.__context = {}
@@ -228,26 +239,21 @@ class Record:
             for transformer in transformers:
                 transformer.clear()
             video_transformers = [transformer for transformer in transformers if transformer.kind == "video"]
+            logger.debug(f'got video transformers {len(video_transformers)}')
             audio_transformers = [transformer for transformer in transformers if transformer.kind == "audio"]
+            logger.debug(f'got audio transformers {len(video_transformers)}')
             out = BytesIO()
             with av_open(file=self.file, mode='r', format=self.format, options=self.options) as input_f:
                 with av_open(file=out, mode='w', format="mp4") as out_f:
                     for stream in input_f.streams.video:
                         out_stream = self._new_stream_from(out_f, stream)
                         for frame in input_f.decode(stream):
-                            pts = frame.pts
-                            time_base = frame.time_base
                             if stream.type == "video":
                                 for transformer in video_transformers:
                                     frame = transformer.transform(frame=frame, record=self)
                             elif stream.type == "audio":
                                 for transformer in audio_transformers:
                                     frame = transformer.transform(frame=frame, record=self)
-                            logger.debug(f"pts: {pts}/{frame.pts}, time_base: {time_base}/{frame.time_base}")
-                            if frame.pts is None:
-                                frame.pts = pts
-                            if frame.time_base is None:
-                                frame.time_base = time_base
                             try:
                                 for packet in out_stream.encode(frame):
                                     out_f.mux(packet)
@@ -865,12 +871,25 @@ class RecordPlayer(DOMWidget, BaseWidget):
         return self.add_transformer("audio", callback, channel)
     
     def remove_transformer(self, transformer: RecordFrameTransformer, channel: str | None=None) -> None:
+        change = False
         if channel:
             transformers = self.__channel_transformers.get(channel)
-            if transformers:
+            if transformers and transformer in transformers:
                 transformers.remove(transformer)
+                change = True
+                logger.debug(f'remove success from channel {channel}')
+                if not transformers:
+                    del self.__channel_transformers[channel]
+                    logger.debug(f'channel {channel} is removed.')
         else:
-            self.__base_transformers.remove(transformer)
+            if transformer in self.__base_transformers:
+                self.__base_transformers.remove(transformer)
+                change = True
+        if change:
+            args = {}
+            if channel:
+                args["channel"] = channel
+            self.send_command("channel_stale", "", args=args)
         
     def get_transformers(self, channel: str | None = None) -> list[RecordFrameTransformer]:
         if channel is None or channel not in self.__channel_transformers:
@@ -881,6 +900,7 @@ class RecordPlayer(DOMWidget, BaseWidget):
         return transformers
         
     def _get_media_data(self, index: int, channel: str) -> bytes | None:
+        logger.debug(f'get media data for index {index} and channel {channel}')
         record = self.recorder.factory.get_record(index=index)
         if not record:
             return None
