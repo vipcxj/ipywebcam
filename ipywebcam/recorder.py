@@ -1,4 +1,8 @@
 import asyncio
+import inspect
+import json
+import logging
+import os
 import re
 import uuid
 from abc import ABCMeta, abstractmethod
@@ -6,24 +10,22 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from enum import Enum
 from io import BytesIO
-import inspect
-import os
 from os import path
-import json
-from typing import Callable, Tuple, Generic, IO, Any as AnyType
+from typing import IO
+from typing import Any as AnyType
+from typing import Callable, Generic, Tuple
 from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
-from traitlets import Bool, Unicode, CUnicode
-import logging
 
 from aiortc import RTCPeerConnection
 from aiortc.contrib.media import MediaStreamTrack
 from av import AudioFrame, VideoFrame
 from av import open as av_open
 from ipywidgets import DOMWidget
+from traitlets import Bool, CUnicode, Unicode
 
 from ._frontend import module_name, module_version
-from .common import BaseWidget
-from .webcam import MediaTransformer, WebCamWidget, MT
+from .common import BaseWidget, normpath, makesure_path
+from .webcam import MT, MediaTransformer, WebCamWidget
 
 logger = logging.getLogger("ipywebcam")
 
@@ -104,7 +106,7 @@ class Record:
         self.meta = meta
         self.external_meta = external_meta
     
-    def __repr__(self) -> str:
+    def to_url(self, base: str = None) -> str:
         query = {}
         if self.format:
             query["format"] = self.format
@@ -117,7 +119,12 @@ class Record:
         if self.external_meta:
             for key in self.external_meta.keys():
                 query[f"emeta.{key}"] = self.external_meta[key]
-        return urlunparse(('', '', self.file, '', urlencode(query=query), ''))
+        base = '' if base is None else base
+        url = normpath(path.relpath(normpath(self.file_path), normpath(base)))
+        return urlunparse(('', '', url, '', urlencode(query=query), ''))
+    
+    def __repr__(self) -> str:
+        return self.to_url()
     
     def __str__(self) -> str:
         return self.__repr__()
@@ -209,6 +216,8 @@ class Record:
     def open(self, mode: str):
         self.close()
         self.__mode = mode
+        if isinstance(self.file, str):
+            makesure_path(self.file)
         self.__container = av_open(file=self.file, mode=mode, format=self.format, options=self.options)
         self.__tracks = {}
         
@@ -617,8 +626,9 @@ class FileListFactory(RecordFactory):
         if self.flush_when_close:
             self.flush()
         record_list_path = self._full_path(f'{self.name}.record_list')
+        makesure_path(record_list_path)
         with open(record_list_path, 'w') as f:
-            f.writelines([f"{record}\n" for record in self.__record_list])
+            f.writelines([f"{record.to_url(self.base_path)}\n" for record in self.__record_list])
         self.__record_list = None
         
     def get_record(self, index: int) -> Record | None:
