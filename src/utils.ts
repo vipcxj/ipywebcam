@@ -18,3 +18,12 @@ export function arrayFind<T>(
 export function isMac(): boolean {
   return window.navigator.userAgent.indexOf('Mac') !== -1;
 }
+
+export function calcPageX(element: Element): number {
+  const { left } = element.getBoundingClientRect();
+  return left + document.body.scrollLeft;
+}
+
+export function calcMouseOffsetX(evt: MouseEvent, target: Element): number {
+  return evt.pageX - calcPageX(target);
+}

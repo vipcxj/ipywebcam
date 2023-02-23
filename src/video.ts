@@ -1,6 +1,7 @@
 /* eslint-disable @typescript-eslint/no-non-null-assertion */
 
 import '../css/video.css';
+import { RangeBar } from './range';
 import { arrayInclude } from './utils';
 
 const svgNS = 'http://www.w3.org/2000/svg';
@@ -116,7 +117,7 @@ export function createPlaybackAnimation(): HTMLDivElement {
   return div;
 }
 
-export function createVideoProgress(): HTMLDivElement {
+function createVideoProgress(): HTMLDivElement {
   const container = document.createElement('div');
   container.classList.add('video-progress');
   const progress = document.createElement('progress');
@@ -130,6 +131,8 @@ export function createVideoProgress(): HTMLDivElement {
   input.value = '0';
   input.min = '0';
   input.step = '1';
+  const rangeBar = document.createElement('div');
+  rangeBar.classList.add('range-bar', 'hidden');
   const tooltip = document.createElement('div');
   tooltip.id = makeId('seek-tooltip');
   tooltip.classList.add('seek-tooltip');
@@ -137,6 +140,7 @@ export function createVideoProgress(): HTMLDivElement {
   container.appendChild(progress);
   container.appendChild(input);
   container.appendChild(tooltip);
+  container.appendChild(rangeBar);
   return container;
 }
 
@@ -830,6 +834,7 @@ export interface VideoOptions {
     mute?: string | VideoShortcut;
     fullscreen?: string | VideoShortcut;
     pip?: string | VideoShortcut;
+    range?: string | VideoShortcut;
   };
 }
 
@@ -839,6 +844,7 @@ interface NormaledVideoOptions {
     mute: NormaledVideoShortcut;
     fullscreen: NormaledVideoShortcut;
     pip: NormaledVideoShortcut;
+    range: NormaledVideoShortcut;
   };
 }
 
@@ -848,6 +854,7 @@ const DEFAULT_OPTIONS: VideoOptions = {
     mute: 'm',
     fullscreen: 'f',
     pip: 'p',
+    range: 'v',
   },
 };
 
@@ -880,6 +887,7 @@ function makeOptions(otps: VideoOptions): NormaledVideoOptions {
   options.shortcuts.mute = makeShortcut(options.shortcuts.mute!);
   options.shortcuts.pip = makeShortcut(options.shortcuts.pip!);
   options.shortcuts.play = makeShortcut(options.shortcuts.play!);
+  options.shortcuts.range = makeShortcut(options.shortcuts.range!);
   return options as NormaledVideoOptions;
 }
 
@@ -907,6 +915,7 @@ export class Video {
   progress: HTMLProgressElement;
   seek: HTMLInputElement;
   seekTooltip: HTMLDivElement;
+  rangeBar: RangeBar;
   volume: HTMLInputElement;
   volumeButton: HTMLButtonElement;
   volumeIcons: SVGSVGElement;
@@ -954,6 +963,9 @@ export class Video {
     this.seekTooltip = this.container.querySelector(
       'div.seek-tooltip'
     )! as HTMLDivElement;
+    this.rangeBar = new RangeBar(
+      this.container.querySelector('div.range-bar')! as HTMLDivElement
+    );
     this.volume = this.container.querySelector(
       'input.volume'
     )! as HTMLInputElement;
@@ -1045,6 +1057,7 @@ export class Video {
     if (url) {
       URL.revokeObjectURL(url);
     }
+    this.rangeBar.destroy();
   };
 
   updateChannels = (channels: string[] = []): void => {
@@ -1183,6 +1196,7 @@ export class Video {
     const time = formatTime(videoDuration);
     this.duration.innerText = `${time.minutes}:${time.seconds}`;
     this.duration.setAttribute('datetime', `${time.minutes}m ${time.seconds}s`);
+    this.rangeBar.max = videoDuration;
   };
 
   updateCurrentTime = (): void => {
@@ -1351,6 +1365,10 @@ export class Video {
     }
   };
 
+  toggleRangeBar = (): void => {
+    this.rangeBar.toggle();
+  };
+
   // hideControls hides the video controls when not in use
   // if the video is paused, the controls must remain visible
   hideControls = (): void => {
@@ -1377,7 +1395,7 @@ export class Video {
       return;
     }
     const { key, ctrlKey, altKey, shiftKey } = event;
-    const { play, mute, fullscreen, pip } = this.options.shortcuts;
+    const { play, mute, fullscreen, pip, range } = this.options.shortcuts;
     if (
       key === play.key &&
       (play.ctrl === !!ctrlKey ||
@@ -1414,6 +1432,13 @@ export class Video {
         pip.shift === !!shiftKey)
     ) {
       this.togglePip();
+    } else if (
+      key === range.key &&
+      (range.ctrl === !!ctrlKey ||
+        range.alt === !!altKey ||
+        range.shift === !!shiftKey)
+    ) {
+      this.toggleRangeBar();
     }
   };
 }

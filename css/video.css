@@ -3,7 +3,7 @@
    ========================================================================== */
 
 :root {
-  --youtube-red: #FE0900;
+  --youtube-red: rgb(254, 9, 0);
 }
 
 .ipywebcam.video-container {
@@ -85,7 +85,7 @@
 .ipywebcam.video-container .seek-tooltip {
   display: none;
   position: absolute;
-  top: -50px;
+  top: -30px;
   margin-left: -20px;
   font-size: 12px;
   padding: 3px;
@@ -93,6 +93,42 @@
   font-weight: bold;
   color: #fff;
   background-color: rgba(0, 0, 0, 0.6);
+}
+
+.ipywebcam.video-container .range-bar {
+  position: absolute;
+  top: 12px;
+  width: 100%;
+  height: 8.4px;
+  background-color: #474545;
+  cursor: pointer;
+  border-radius: 2px;
+  overflow: visible;
+}
+
+.ipywebcam.video-container .range-bar .marker {
+  position: absolute;
+  width: 4px;
+  height: 10px;
+  top: -0.8px;
+  background-color: rgb(254, 9, 0);
+  border-radius: 1px;
+}
+
+.ipywebcam.video-container .range-bar .marker.floating {
+  background-color: rgba(254, 9, 0, 0.7);
+}
+
+.ipywebcam.video-container .range-bar .marker.selected {
+  background-color: rgba(254, 0, 120, 0.7);
+}
+
+.ipywebcam.video-container .range-bar .range-mask {
+  position: absolute;
+  height: 8.4px;
+  background-color: #00c569;
+  cursor: pointer;
+  border-radius: 2px;
 }
 
 .ipywebcam.video-container .bottom-controls {
