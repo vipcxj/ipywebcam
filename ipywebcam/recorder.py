@@ -21,7 +21,7 @@ from aiortc.contrib.media import MediaStreamTrack
 from av import AudioFrame, VideoFrame
 from av import open as av_open
 from ipywidgets import DOMWidget
-from traitlets import Bool, CUnicode, Unicode
+from traitlets import List, Float, Bool, Int, CUnicode, Unicode
 
 from ._frontend import module_name, module_version
 from .common import BaseWidget, normpath, makesure_path
@@ -839,6 +839,9 @@ class RecordPlayer(DOMWidget, BaseWidget):
     loop = Bool(False, help="When true, the video will start from the beginning after finishing").tag(sync=True)
     autonext = Bool(True, help="When true, the video will start next after finishing").tag(sync=True)
     controls = Bool(True, help="Specifies that video controls should be displayed (such as a play/pause button etc)").tag(sync=True)
+    selected_index = Int(default_value=None, allow_none=True).tag(sync=True)
+    selected_channel = Unicode(default_value=None, allow_none=True).tag(sync=True)
+    selected_range = List(Float, default_value=[0, 0], minlen=2, maxlen=2).tag(sync=True)
     __base_transformers: list[RecordFrameTransformer]
     __channel_transformers: dict[str, list[RecordFrameTransformer]]
     
@@ -849,6 +852,7 @@ class RecordPlayer(DOMWidget, BaseWidget):
         self.__channel_transformers = {}
         self.add_answer("fetch_meta", self.answer_fetch_meta)
         self.add_answer("fetch_data", self.answer_fetch_data)
+        self.add_answer("set_markers", self.answer_set_markers)
         if fix_time:
             self.add_video_transformer(fix_time_transformer)
             self.add_audio_transformer(fix_time_transformer)
@@ -908,6 +912,20 @@ class RecordPlayer(DOMWidget, BaseWidget):
         for transformer in self.__channel_transformers[channel]:
             transformers.append(transformer)
         return transformers
+    
+    def get_markers(self, index: int) -> list[float] | None:
+        logger.debug(f'[get_markers] index: {index}')
+        record = self.recorder.factory.get_record(index=index)
+        if not record:
+            return None
+        return record.get_meta('markers')
+    
+    def set_markers(self, index: int, markers: list[float]) -> None:
+        logger.debug(f'[set_markers] index: {index}, markers: {markers}')
+        record = self.recorder.factory.get_record(index=index)
+        if not record:
+            return
+        record.set_meta('markers', markers)
         
     def _get_media_data(self, index: int, channel: str) -> bytes | None:
         logger.debug(f'get media data for index {index} and channel {channel}')
@@ -923,6 +941,9 @@ class RecordPlayer(DOMWidget, BaseWidget):
             "record_count": self.recorder.factory.record_count(),
             "chanels": self.__channel_transformers.keys(),
         }
+        if "index" in args:
+            index = args["index"]
+            meta["markers"] = self.get_markers(index=index)
         self.answer(cmd=cmd, target_id=id, content=meta)
     
     def answer_fetch_data(self, id: str, cmd: str, args: dict) -> None:
@@ -931,4 +952,11 @@ class RecordPlayer(DOMWidget, BaseWidget):
             channel = args.get("channel")
             data = self._get_media_data(index=index, channel=channel)
             self.answer(cmd=cmd, target_id=id, content={}, buffers=[data] if data is not None else None)
+            
+    def answer_set_markers(self, id: str, cmd: str, args: dict) -> None:
+        if "index" in args and "markers" in args:
+            index = args["index"]
+            markers = args["markers"]
+            self.set_markers(index=index, markers=markers)
+            self.answer(cmd=cmd, target_id=id, content={})
             

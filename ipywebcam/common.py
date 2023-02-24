@@ -15,7 +15,7 @@ def normpath(p: str) -> str:
 def makesure_path(p: str) -> str:
     p = normpath(p)
     dir = path.dirname(p)
-    if not path.exists(dir):
+    if dir and not path.exists(dir):
         os.makedirs(dir, exist_ok=True)
 
 Answer = Callable[[str, str, dict], None]

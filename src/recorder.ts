@@ -3,6 +3,7 @@ import LRU from 'lru-cache';
 
 import { BaseModel } from './common';
 import { Video } from './video';
+import { arrayEqual } from './utils';
 
 type ChannelStaleArgs = {
   channel?: string;
@@ -23,14 +24,17 @@ type RefreshCallback = (index?: number, channel?: string) => void;
 interface RecorderMeta {
   record_count: number;
   chanels: string[];
+  markers?: number[];
 }
 
 export class RecorderPlayerModel extends BaseModel<RecorderMsgTypeMap> {
   cache: LRU<string, Blob> = new LRU({
-    max: 6,
+    max: 10,
+  });
+  metaCache: LRU<string, RecorderMeta> = new LRU({
+    max: 100,
   });
   fetchStates: Record<string, FetchState> = {};
-  meta: RecorderMeta | undefined;
   refresh_callbacks: RefreshCallback[] = [];
 
   static model_name = 'RecorderPlayerModel';
@@ -48,6 +52,9 @@ export class RecorderPlayerModel extends BaseModel<RecorderMsgTypeMap> {
       loop: false,
       controls: true,
       autonext: true,
+      selected_index: null,
+      selected_channel: null,
+      selected_range: [0, 0],
     };
   }
 
@@ -65,7 +72,6 @@ export class RecorderPlayerModel extends BaseModel<RecorderMsgTypeMap> {
       } else {
         this.cache.clear();
       }
-      this.meta = undefined;
       this.triggerRefresh(undefined, channel);
     });
   }
@@ -87,14 +93,25 @@ export class RecorderPlayerModel extends BaseModel<RecorderMsgTypeMap> {
     });
   };
 
-  fetchMeta = async (): Promise<RecorderMeta> => {
-    if (this.meta) {
-      return this.meta;
+  createIndexKey = (index: number | undefined | null): string => {
+    return index === undefined || index === null ? 'global' : `${index}`;
+  };
+
+  fetchMeta = async (
+    index: number | undefined | null = undefined
+  ): Promise<RecorderMeta> => {
+    const key = this.createIndexKey(index);
+    const cached = this.metaCache.get(key);
+    if (cached) {
+      return cached;
     }
-    const { content } = await this.send_cmd('fetch_meta', {});
-    this.meta = content;
-    // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
-    return this.meta!;
+    const args: Record<string, any> = {};
+    if (index !== undefined) {
+      args['index'] = index;
+    }
+    const { content } = await this.send_cmd('fetch_meta', args);
+    this.metaCache.set(key, content);
+    return content;
   };
 
   fetchData = async (index: number, channel: string): Promise<Blob> => {
@@ -136,6 +153,16 @@ export class RecorderPlayerModel extends BaseModel<RecorderMsgTypeMap> {
       });
     }
   };
+
+  invalidateMeta = (index: number | undefined | null): void => {
+    const key = this.createIndexKey(index);
+    this.metaCache.delete(key);
+  };
+
+  setMarkers = async (index: number, markers: number[]): Promise<void> => {
+    await this.send_cmd('set_markers', { index, markers });
+    this.invalidateMeta(index);
+  };
 }
 
 type LoadStateCallback = (loading: boolean) => void;
@@ -146,11 +173,14 @@ export class RecorderPlayerView extends DOMWidgetView {
   indexSize = 0;
   channel = '';
   channels: string[] = [];
+  markers?: number[];
   private loading = false;
   private loadStateOnceCallbacks: LoadStateCallback[] = [];
+  selectedRange: [number, number] = [0, 0];
 
   constructor(...args: any[]) {
     super(...args);
+    this.selectedRange = this.model.get('selected_range');
     this.model.addRefereshCallback((i, c) => {
       if (
         this.index === i &&
@@ -160,6 +190,10 @@ export class RecorderPlayerView extends DOMWidgetView {
       }
     });
   }
+
+  isRangeSelected = (): boolean => {
+    return this.selectedRange[1] > this.selectedRange[0];
+  };
 
   addLoadStateOnceCallback = (callback: LoadStateCallback): void => {
     this.loadStateOnceCallbacks.push(callback);
@@ -178,22 +212,56 @@ export class RecorderPlayerView extends DOMWidgetView {
     this.initVideo();
   }
 
-  fetchMeta = async (): Promise<void> => {
-    const { record_count = 0, chanels = [] } = await this.model.fetchMeta();
+  fetchMeta = async (index: number | undefined = undefined): Promise<void> => {
+    const {
+      record_count = 0,
+      chanels = [],
+      markers,
+    } = await this.model.fetchMeta(index);
     this.indexSize = record_count;
     this.channels = chanels;
+    this.markers = markers;
   };
 
   initVideo = async (): Promise<void> => {
     if (!this.video) {
       this.video = new Video();
+      this.video.addVideoInitHandler((video) => {
+        video.rangeBar.setMarkers(this.markers);
+      });
       this.video.addIndexSelectHandler((i) => {
         this.load(i, undefined);
       });
       this.video.addChannelSelectHandler((channel) => {
         this.load(undefined, channel, false, true);
       });
+      this.video.rangeBar.addRangeSelectedCallback((range) => {
+        this.selectedRange = range;
+        if (this.isRangeSelected()) {
+          const video = this.video?.video;
+          if (video) {
+            video.currentTime = range[0];
+          }
+          this.model.set('selected_index', this.index);
+          this.model.set('selected_channel', this.channel);
+        } else {
+          this.model.set('selected_index', null);
+          this.model.set('selected_channel', null);
+        }
+        this.model.set('selected_range', range);
+        this.model.save_changes();
+      });
+      this.video.rangeBar.addMarkersChangeCallback((markers) => {
+        this.markers = markers;
+        this.model.setMarkers(this.index, markers);
+      });
+      this.model.on('change:selected_index', this.onSelectedIndexChange);
+      this.model.on('change:selected_channel', this.onSelectedChannelChange);
+      this.model.on('change:selected_range', this.onSelectedRangeChange);
       this.video.video.addEventListener('ended', async () => {
+        if (this.isRangeSelected()) {
+          return;
+        }
         const autonext = this.model.get('autonext');
         const loop = this.model.get('loop');
         if (autonext) {
@@ -204,10 +272,49 @@ export class RecorderPlayerView extends DOMWidgetView {
           }
         }
       });
+      this.video.video.addEventListener('timeupdate', () => {
+        if (this.isRangeSelected()) {
+          const video = this.video?.video;
+          if (video) {
+            if (video.currentTime >= this.selectedRange[1]) {
+              const loop = this.model.get('loop');
+              if (loop) {
+                video.currentTime = this.selectedRange[0];
+              } else {
+                video.pause();
+              }
+            }
+          }
+        }
+      });
       this.el.appendChild(this.video.container);
       this.update();
-      await this.fetchMeta();
       await this.load(0, '');
+    }
+  };
+
+  onSelectedIndexChange = (): void => {
+    const index = this.model.get('selected_index');
+    if (index !== undefined && index !== null && this.index !== index) {
+      this.load(index, undefined);
+    }
+  };
+
+  onSelectedChannelChange = (): void => {
+    const channel = this.model.get('selected_channel');
+    if (channel && this.channel !== channel) {
+      this.load(undefined, channel);
+    }
+  };
+
+  onSelectedRangeChange = (): void => {
+    const range = this.model.get('selected_range');
+    if (!arrayEqual(this.selectedRange, range)) {
+      this.selectedRange = range;
+      const rangeBar = this.video?.rangeBar;
+      if (rangeBar) {
+        rangeBar.selectRange(range);
+      }
     }
   };
 
@@ -243,7 +350,7 @@ export class RecorderPlayerView extends DOMWidgetView {
       }
       await this.waitForLoading(false);
       this.setLoading(true);
-      await this.fetchMeta();
+      await this.fetchMeta(index);
       try {
         if (this.indexSize > 0) {
           const blob = await this.model.fetchData(index, channel);
@@ -251,6 +358,7 @@ export class RecorderPlayerView extends DOMWidgetView {
         }
         this.index = index;
         this.channel = channel;
+        this.video.rangeBar.unselectRange();
         this.video.updateIndexerSize(this.indexSize);
         this.video.updateIndexerIndex(this.index);
         this.video.updateChannels(this.channels);
@@ -301,6 +409,9 @@ export class RecorderPlayerView extends DOMWidgetView {
   }
 
   remove(): void {
+    this.model.off('change:selected_index', this.onSelectedIndexChange);
+    this.model.off('change:selected_channel', this.onSelectedChannelChange);
+    this.model.off('change:selected_range', this.onSelectedRangeChange);
     this.video?.destroy();
     this.video = undefined;
   }

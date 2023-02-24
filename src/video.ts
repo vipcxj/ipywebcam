@@ -2,7 +2,7 @@
 
 import '../css/video.css';
 import { RangeBar } from './range';
-import { arrayInclude } from './utils';
+import { arrayInclude, arrayRemove } from './utils';
 
 const svgNS = 'http://www.w3.org/2000/svg';
 const prefix = 'ipywebcam-video-';
@@ -132,6 +132,7 @@ function createVideoProgress(): HTMLDivElement {
   input.min = '0';
   input.step = '1';
   const rangeBar = document.createElement('div');
+  rangeBar.setAttribute('draggable', 'false');
   rangeBar.classList.add('range-bar', 'hidden');
   const tooltip = document.createElement('div');
   tooltip.id = makeId('seek-tooltip');
@@ -334,6 +335,7 @@ function createBottomControls(options: NormaledVideoOptions): HTMLDivElement {
 
 function createVideoControls(options: NormaledVideoOptions): HTMLDivElement {
   const container = document.createElement('div');
+  container.setAttribute('draggable', 'false');
   container.classList.add('video-controls');
   container.tabIndex = 0;
   const videoProgress = createVideoProgress();
@@ -904,6 +906,8 @@ const SpeedOptions: Array<Option<number>> = [
   { label: '3.0x', value: 3 },
 ];
 
+type VideoInitHandler = (video: Video) => void;
+
 export class Video {
   options: NormaledVideoOptions;
   container: HTMLDivElement;
@@ -936,6 +940,7 @@ export class Video {
   channelSelectorPannel: SelectorPannel<string>;
   channel = '';
   currentTime: number | undefined;
+  videoInitHandlers: VideoInitHandler[] = [];
 
   constructor(opts: VideoOptions = {}) {
     this.options = makeOptions(opts);
@@ -1058,6 +1063,14 @@ export class Video {
       URL.revokeObjectURL(url);
     }
     this.rangeBar.destroy();
+  };
+
+  addVideoInitHandler = (handler: VideoInitHandler): void => {
+    this.videoInitHandlers.push(handler);
+  };
+
+  removeVideoInitHandler = (handler: VideoInitHandler): void => {
+    arrayRemove(this.videoInitHandlers, handler);
   };
 
   updateChannels = (channels: string[] = []): void => {
@@ -1197,6 +1210,9 @@ export class Video {
     this.duration.innerText = `${time.minutes}:${time.seconds}`;
     this.duration.setAttribute('datetime', `${time.minutes}m ${time.seconds}s`);
     this.rangeBar.max = videoDuration;
+    for (const handler of this.videoInitHandlers) {
+      handler(this);
+    }
   };
 
   updateCurrentTime = (): void => {

@@ -1,11 +1,18 @@
 /* eslint-disable @typescript-eslint/no-non-null-assertion */
-import { calcMouseOffsetX } from './utils';
+import { arrayEqual, arrayRemove, calcMouseOffsetX } from './utils';
 
 export interface RangeBarOption {
   max?: number;
   min?: number;
   step?: number;
 }
+
+export type OnRangeSelect = (
+  range: [number, number],
+  rangeBar: RangeBar
+) => any;
+
+export type OnMarkersChange = (markers: number[], rangeBar: RangeBar) => any;
 
 export class RangeBar {
   container: HTMLDivElement;
@@ -15,8 +22,11 @@ export class RangeBar {
 
   markers: { [key: number]: HTMLDivElement };
   floatingMarker?: HTMLDivElement;
-  selected?: number;
+  selectedKey?: number;
   rangeMasker: HTMLDivElement;
+  selectedRange: [number, number] = [0, 0];
+  markersChangeCallbacks: OnMarkersChange[] = [];
+  rangeSelectedCallbacks: OnRangeSelect[] = [];
 
   constructor(container: HTMLDivElement, option: RangeBarOption = {}) {
     this.container = container;
@@ -29,7 +39,8 @@ export class RangeBar {
     this.container.appendChild(this.rangeMasker);
     this.container.addEventListener('click', (evt) => {
       if (evt.ctrlKey) {
-        this.addMarker(evt.offsetX);
+        const pos = this.adjustPos(evt.offsetX);
+        this.addMarker(pos);
       } else {
         this.onMouseRangeSelect(evt);
       }
@@ -107,6 +118,26 @@ export class RangeBar {
     return this.min + (pos * (this.max - this.min)) / 100;
   };
 
+  value2pos = (value: number): number => {
+    return ((value - this.min) / (this.max - this.min)) * 100;
+  };
+
+  addRangeSelectedCallback = (callback: OnRangeSelect): void => {
+    this.rangeSelectedCallbacks.push(callback);
+  };
+
+  removeRangeSelectedCallback = (callback: OnRangeSelect): void => {
+    arrayRemove(this.rangeSelectedCallbacks, callback);
+  };
+
+  addMarkersChangeCallback = (callback: OnMarkersChange): void => {
+    this.markersChangeCallbacks.push(callback);
+  };
+
+  removeMarkersChangeCallback = (callback: OnMarkersChange): void => {
+    arrayRemove(this.markersChangeCallbacks, callback);
+  };
+
   calcRange = (pos: number): [number, number] => {
     const res: [number, number] = [this.min, this.max];
     const value = this.pos2value(pos);
@@ -143,46 +174,100 @@ export class RangeBar {
     }
   };
 
-  findMarkderKey = (marker: HTMLDivElement): number => {
+  findMarkderKey = (marker: HTMLDivElement): number | undefined => {
     for (const key of Object.keys(this.markers)) {
       const pos = Number.parseFloat(key);
       if (marker === this.markers[pos]) {
         return pos;
       }
     }
-    return 0;
+    return undefined;
   };
 
-  addMarker = (pos: number): void => {
+  getMarkers = (): number[] => {
+    return Object.keys(this.markers)
+      .map((key) => {
+        const pos = Number.parseFloat(key);
+        return this.pos2value(pos);
+      })
+      .sort();
+  };
+
+  setMarkers = (markers: number[] | undefined | null): void => {
+    if (!markers) {
+      markers = [];
+    }
+    if (arrayEqual(this.getMarkers(), markers)) {
+      return;
+    }
+    this.unselectRange();
+    this.removeSelect();
+    for (const key of Object.keys(this.markers)) {
+      const marker = this.markers[key as any];
+      this.removeMarkerByNode(marker, false);
+    }
+    for (const marker of markers) {
+      this.addMarker(this.value2pos(marker), false);
+    }
+    this.execuateMarkersCallbacks();
+  };
+
+  execuateMarkersCallbacks = (): void => {
+    const markers = this.getMarkers();
+    for (const callback of this.markersChangeCallbacks) {
+      callback(markers, this);
+    }
+  };
+
+  removeMarkerByNode = (
+    marker: HTMLDivElement,
+    triggerCallback = true
+  ): void => {
+    const key = this.findMarkderKey(marker);
+    if (key !== undefined) {
+      delete this.markers[key];
+      this.container.removeChild(marker);
+      if (triggerCallback) {
+        this.execuateMarkersCallbacks();
+      }
+    }
+  };
+
+  addMarker = (pos: number, triggerCallback = true): void => {
     if (this.isEnabled()) {
-      pos = this.adjustPos(pos);
       let marker = this.markers[pos];
       if (!marker) {
         this.markers[pos] = marker = document.createElement('div');
+        marker.setAttribute('draggable', 'false');
         marker.classList.add('marker');
         this.container.appendChild(marker);
         marker.style.left = `${pos}%`;
         marker.style.translate = '-50%';
         marker.addEventListener('click', (evt) => {
+          evt.stopPropagation();
           if (evt.altKey) {
-            const key = this.findMarkderKey(marker);
-            delete this.markers[key];
-            this.container.removeChild(marker);
+            this.removeMarkerByNode(marker);
           }
         });
-        marker.addEventListener('mousedown', () => {
+        marker.addEventListener('mousedown', (evt) => {
+          evt.stopPropagation();
           const key = this.findMarkderKey(marker);
-          this.setSelect(key);
+          if (key !== undefined) {
+            this.setSelect(key);
+          }
         });
         marker.addEventListener('mouseup', () => {
           this.removeSelect();
         });
+        if (triggerCallback) {
+          this.execuateMarkersCallbacks();
+        }
       }
     }
   };
 
   setSelect = (pos: number): void => {
-    this.selected = pos;
+    this.selectedKey = pos;
     const marker = this.markers[pos];
     if (marker) {
       marker.classList.add('selected');
@@ -190,43 +275,134 @@ export class RangeBar {
   };
 
   removeSelect = (): void => {
-    if (this.selected) {
-      const marker = this.markers[this.selected];
+    if (this.selectedKey !== undefined) {
+      const marker = this.markers[this.selectedKey];
       if (marker) {
         marker.classList.remove('selected');
       }
-      this.selected = undefined;
+      this.selectedKey = undefined;
     }
+  };
+
+  canKeyMove = (posFrom: number, posTo: number): boolean => {
+    if (posFrom === posTo) {
+      return false;
+    }
+    if (posTo < 0 || posTo > 100) {
+      return false;
+    }
+    const keys = Object.keys(this.markers);
+    for (const key of keys) {
+      const pos = Number.parseFloat(key);
+      if (pos === posFrom) {
+        continue;
+      }
+      if (pos === posTo) {
+        return false;
+      }
+      if (pos < posFrom && posTo > posFrom) {
+        continue;
+      }
+      if (pos > posFrom && posTo < posFrom) {
+        continue;
+      }
+      if (pos < posFrom && pos > posTo) {
+        return false;
+      }
+      if (pos > posFrom && pos < posTo) {
+        return false;
+      }
+    }
+    return true;
   };
 
   onSelectedMove = (evt: MouseEvent): void => {
     let pos = calcMouseOffsetX(evt, this.container);
     pos = this.adjustPos(pos);
-    if (this.selected && this.selected !== pos) {
-      const marker = this.markers[this.selected];
+    if (
+      this.selectedKey !== undefined &&
+      this.canKeyMove(this.selectedKey, pos)
+    ) {
+      const marker = this.markers[this.selectedKey];
       if (marker) {
         marker.style.left = `${pos}%`;
         marker.style.translate = '-50%';
-        delete this.markers[this.selected];
-        this.selected = pos;
+        delete this.markers[this.selectedKey];
+        this.updateRangeSelectBecauseOfKeyChagne(this.selectedKey, pos);
+        this.selectedKey = pos;
         this.markers[pos] = marker;
+        this.execuateMarkersCallbacks();
       }
     }
   };
 
+  isRangeSelected = (range?: [number, number]): boolean => {
+    if (!range) {
+      range = this.selectedRange;
+    }
+    return range[1] > range[0];
+  };
+
+  updateRangeSelectBecauseOfKeyChagne = (
+    posFrom: number,
+    posTo: number
+  ): void => {
+    const valueFrom = this.pos2value(posFrom);
+    if (
+      this.isRangeSelected() &&
+      (valueFrom === this.selectedRange[0] ||
+        valueFrom === this.selectedRange[1])
+    ) {
+      const valueTo = this.pos2value(posTo);
+      let valueOther: number;
+      if (valueFrom === this.selectedRange[0]) {
+        valueOther = this.selectedRange[1];
+      } else {
+        valueOther = this.selectedRange[0];
+      }
+      const newRange: [number, number] =
+        valueTo <= valueOther ? [valueTo, valueOther] : [valueOther, valueTo];
+      this.updateRangeSelect(newRange);
+    }
+  };
+
+  updateRangeSelect = (newRange: [number, number]): void => {
+    if (this.isRangeSelected(newRange)) {
+      const cWidth = this.container.clientWidth;
+      const left = ((newRange[0] - this.min) / (this.max - this.min)) * cWidth;
+      const right = ((newRange[1] - this.min) / (this.max - this.min)) * cWidth;
+      this.rangeMasker.style.left = `${left}px`;
+      this.rangeMasker.style.width = `${right - left}px`;
+      this.rangeMasker.classList.remove('hidden');
+    }
+    this.selectedRange = newRange;
+    for (const callback of this.rangeSelectedCallbacks) {
+      callback(this.selectedRange, this);
+    }
+  };
+
   onMouseRangeSelect = (evt: MouseEvent): void => {
+    if (this.selectedKey !== undefined) {
+      // when moving key point, do nothing.
+      return;
+    }
     const cWidth = this.container.clientWidth;
     if (cWidth === 0) {
       return;
     }
     const pos = (calcMouseOffsetX(evt, this.container) / cWidth) * 100;
     const range = this.calcRange(pos);
-    if (range[0] < range[1]) {
-      const left = ((range[0] - this.min) / (this.max - this.min)) * cWidth;
-      const right = ((range[1] - this.min) / (this.max - this.min)) * cWidth;
-      this.rangeMasker.style.left = `${left}px`;
-      this.rangeMasker.style.width = `${right - left}px`;
-      this.rangeMasker.classList.remove('hidden');
+    this.updateRangeSelect(range);
+  };
+
+  selectRange = (range: [number, number]): void => {
+    if (arrayEqual(this.selectedRange, range)) {
+      return;
+    }
+    const posFrom = this.value2pos(range[0]);
+    const posTo = this.value2pos(range[1]);
+    if (this.markers[posFrom] && this.markers[posTo]) {
+      this.updateRangeSelect(range);
     }
   };
 
@@ -234,5 +410,9 @@ export class RangeBar {
     this.rangeMasker.style.left = '0px';
     this.rangeMasker.style.width = '0px';
     this.rangeMasker.classList.add('hidden');
+    this.selectedRange = [0, 0];
+    for (const callback of this.rangeSelectedCallbacks) {
+      callback(this.selectedRange, this);
+    }
   };
 }

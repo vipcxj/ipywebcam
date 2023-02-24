@@ -1,4 +1,5 @@
 import { DOMWidgetModel } from '@jupyter-widgets/base';
+import { arrayRemove } from './utils';
 import { MODULE_NAME, MODULE_VERSION } from './version';
 
 type Args = Record<string, any>;
@@ -16,7 +17,7 @@ export type MessageHandler<C extends string, A extends Args> = (
 ) => void;
 
 type MessageHandlers<MM extends MsgTypeMap> = {
-  [K in keyof MM & string]?: MessageHandler<K, MM[K]>;
+  [K in keyof MM & string]?: Array<MessageHandler<K, MM[K]>>;
 };
 
 export class BaseModel<MM extends MsgTypeMap> extends DOMWidgetModel {
@@ -51,9 +52,11 @@ export class BaseModel<MM extends MsgTypeMap> extends DOMWidgetModel {
         }
         Object.keys(this.messageHandlers).forEach((key) => {
           if (key === cmd) {
-            const handler = this.messageHandlers[key as MM & string];
-            if (handler) {
-              handler(msg, buffers);
+            const handlers = this.messageHandlers[key as MM & string];
+            if (handlers) {
+              handlers.forEach((handler) => {
+                handler(msg, buffers);
+              });
             }
           }
         });
@@ -65,7 +68,22 @@ export class BaseModel<MM extends MsgTypeMap> extends DOMWidgetModel {
     cmd: K,
     handler: MessageHandler<K, MM[K]>
   ): void => {
-    this.messageHandlers[cmd] = handler;
+    let handlers = this.messageHandlers[cmd];
+    if (!handlers) {
+      handlers = this.messageHandlers[cmd] = [];
+    }
+    handlers.push(handler);
+  };
+
+  removeMessageHandler = <K extends string & keyof MM>(
+    cmd: K,
+    handler: MessageHandler<K, MM[K]>
+  ): void => {
+    const handlers = this.messageHandlers[cmd];
+    if (handlers) {
+      // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
+      arrayRemove(handlers!, handler);
+    }
   };
 
   async send_cmd(
