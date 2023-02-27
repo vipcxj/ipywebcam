@@ -1,7 +1,8 @@
+import bisect
 import os
 from logging import Logger
 from os import path
-from typing import Any, Callable
+from typing import Any, Callable, TypeVar
 
 from ipywidgets import Widget
 from traitlets import Unicode
@@ -17,6 +18,27 @@ def makesure_path(p: str) -> str:
     dir = path.dirname(p)
     if dir and not path.exists(dir):
         os.makedirs(dir, exist_ok=True)
+
+V = TypeVar('V')
+K = TypeVar('K')
+def order_insert(seq: list[V], item: V, key_func: Callable[[V], K], keys: list[K] | None=None) -> None:
+    if keys is None:
+        t_keys = [key_func(v) for v in seq]
+    else:
+        t_keys = keys
+    key = key_func(item)
+    i = bisect.bisect_left(t_keys, key)
+    if keys is not None:
+        keys.insert(i, key)
+    seq.insert(i, item)
+    
+def bin_search(seq: list[V], target_key: K, key_func: Callable[[V], K], keys: list[K] | None=None) -> int:
+    keys = [key_func(v) for v in seq] if keys is None else keys
+    i = bisect.bisect_left(keys, target_key)
+    if i != len(keys) and keys[i] == target_key:
+        return i
+    else:
+        return -1
 
 Answer = Callable[[str, str, dict], None]
 

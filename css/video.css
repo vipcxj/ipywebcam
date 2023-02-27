@@ -131,6 +131,20 @@
   border-radius: 2px;
 }
 
+.ipywebcam.video-container .statistics-container {
+  position: relative;
+}
+
+.ipywebcam.video-container .statistics-container svg {
+  display: block;
+  width: 100%;
+  height: 30px;
+}
+
+.ipywebcam.video-container .statistics-container.unused svg {
+  display: none;
+}
+
 .ipywebcam.video-container .bottom-controls {
   display: flex;
   justify-content: space-between;
@@ -195,6 +209,18 @@
 
 .ipywebcam.video-container .fullscreen-button {
   margin-right: 0;
+}
+
+.ipywebcam.video-container .stats-selector svg.icon {
+  display: inline;
+  margin-right: 2px;
+  vertical-align: middle;
+}
+
+.ipywebcam.video-container .stats-selector div.text {
+  display: inline;
+  color: #fff;
+  vertical-align: middle;
 }
 
 .ipywebcam.video-container .index-selector {

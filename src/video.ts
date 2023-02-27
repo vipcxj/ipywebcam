@@ -1,6 +1,7 @@
 /* eslint-disable @typescript-eslint/no-non-null-assertion */
 
 import '../css/video.css';
+import { makeLineChart } from './charts';
 import { RangeBar } from './range';
 import { arrayInclude, arrayRemove } from './utils';
 
@@ -12,15 +13,29 @@ export function makeId(id: string): string {
 
 function createSymbol(
   id: string,
-  pathD: string,
-  viewBox = '0 0 24 24'
+  pathD: string | string[],
+  viewBox = '0 0 24 24',
+  gTrans = ''
 ): SVGSymbolElement {
   const symbol = document.createElementNS(svgNS, 'symbol');
   symbol.id = makeId(id);
   symbol.setAttribute('viewBox', viewBox);
-  const path = document.createElementNS(svgNS, 'path');
-  path.setAttribute('d', pathD);
-  symbol.appendChild(path);
+  if (Array.isArray(pathD)) {
+    const group = document.createElementNS(svgNS, 'g');
+    if (gTrans) {
+      group.setAttribute('transform', gTrans);
+    }
+    for (const p of pathD) {
+      const path = document.createElementNS(svgNS, 'path');
+      path.setAttribute('d', p);
+      group.appendChild(path);
+    }
+    symbol.appendChild(group);
+  } else {
+    const path = document.createElementNS(svgNS, 'path');
+    path.setAttribute('d', pathD);
+    symbol.appendChild(path);
+  }
   return symbol;
 }
 
@@ -87,6 +102,19 @@ function createControlsSvg(): SVGSVGElement {
       'M7.293 4.707 14.586 12l-7.293 7.293 1.414 1.414L17.414 12 8.707 3.293 7.293 4.707z'
     )
   );
+  defs.appendChild(
+    createSymbol(
+      'statistics',
+      [
+        'M2096 2741 c-15 -10 -37 -32 -47 -47 -18 -28 -19 -65 -19 -984 l0 -955 25 -37 c32 -48 47 -50 268 -46 l179 3 29 33 29 32 0 969 c0 967 0 968 -21 995 -40 50 -64 56 -246 56 -148 0 -171 -2 -197 -19z',
+        'M1308 2088 c-30 -8 -41 -18 -58 -52 -19 -41 -20 -58 -20 -643 0 -330 3 -613 6 -629 3 -16 16 -42 30 -59 l24 -30 210 0 210 0 24 30 c14 17 27 43 30 59 3 16 6 299 6 629 0 584 -1 602 -20 643 -18 36 -27 43 -65 53 -53 13 -326 13 -377 -1z',
+        'M504 1426 c-64 -28 -64 -28 -64 -373 l0 -313 29 -32 29 -33 179 -3 c221 -4 236 -2 268 46 l25 37 0 293 c0 328 -3 347 -65 376 -44 21 -353 22 -401 2z',
+        'M42 468 c-39 -32 -41 -35 -41 -91 -1 -42 3 -59 14 -63 8 -3 17 -13 20 -23 3 -9 18 -24 34 -34 27 -16 124 -17 1431 -17 1307 0 1404 1 1431 17 16 10 31 25 34 34 3 10 12 20 20 23 11 4 15 21 15 58 0 49 -3 56 -40 91 l-40 37 -1419 0 -1419 0 -40 -32z',
+      ],
+      '0 0 1000 1000',
+      'translate(100, 900) scale(0.25, -0.25)'
+    )
+  );
   return svg;
 }
 
@@ -142,6 +170,14 @@ function createVideoProgress(): HTMLDivElement {
   container.appendChild(input);
   container.appendChild(tooltip);
   container.appendChild(rangeBar);
+  return container;
+}
+
+function createStatisticsContainer(): HTMLDivElement {
+  const container = document.createElement('div');
+  container.classList.add('statistics-container', 'hidden', 'unused');
+  const svg = document.createElementNS(svgNS, 'svg');
+  container.appendChild(svg);
   return container;
 }
 
@@ -272,6 +308,19 @@ function createChannelSelector(): HTMLButtonElement {
   return container;
 }
 
+function createStatsSelector(): HTMLButtonElement {
+  const container = document.createElement('button');
+  container.classList.add('stats-selector', 'hidden');
+  container.setAttribute('data-title', 'Select Statistics Type');
+  const icon = createSelectiveUses('statistics', 'statistics');
+  icon.classList.add('icon');
+  container.appendChild(icon);
+  const text = document.createElement('div');
+  text.classList.add('text');
+  container.appendChild(text);
+  return container;
+}
+
 function createPipButton(options: NormaledVideoOptions): HTMLButtonElement {
   const button = document.createElement('button');
   button.id = makeId('pip-button');
@@ -310,6 +359,8 @@ function createFullscreenButton(
 function createRightControls(options: NormaledVideoOptions): HTMLDivElement {
   const container = document.createElement('div');
   container.classList.add('right-controls');
+  const statsSelector = createStatsSelector();
+  container.appendChild(statsSelector);
   const indexSelector = createIndexSelector();
   container.appendChild(indexSelector);
   const channelSelector = createChannelSelector();
@@ -340,6 +391,8 @@ function createVideoControls(options: NormaledVideoOptions): HTMLDivElement {
   container.tabIndex = 0;
   const videoProgress = createVideoProgress();
   container.appendChild(videoProgress);
+  const statistics = createStatisticsContainer();
+  container.appendChild(statistics);
   const bottomControls = createBottomControls(options);
   container.appendChild(bottomControls);
   return container;
@@ -837,6 +890,7 @@ export interface VideoOptions {
     fullscreen?: string | VideoShortcut;
     pip?: string | VideoShortcut;
     range?: string | VideoShortcut;
+    stats?: string | VideoShortcut;
   };
 }
 
@@ -847,6 +901,7 @@ interface NormaledVideoOptions {
     fullscreen: NormaledVideoShortcut;
     pip: NormaledVideoShortcut;
     range: NormaledVideoShortcut;
+    stats: NormaledVideoShortcut;
   };
 }
 
@@ -857,6 +912,7 @@ const DEFAULT_OPTIONS: VideoOptions = {
     fullscreen: 'f',
     pip: 'p',
     range: 'v',
+    stats: 's',
   },
 };
 
@@ -890,6 +946,7 @@ function makeOptions(otps: VideoOptions): NormaledVideoOptions {
   options.shortcuts.pip = makeShortcut(options.shortcuts.pip!);
   options.shortcuts.play = makeShortcut(options.shortcuts.play!);
   options.shortcuts.range = makeShortcut(options.shortcuts.range!);
+  options.shortcuts.stats = makeShortcut(options.shortcuts.stats!);
   return options as NormaledVideoOptions;
 }
 
@@ -920,6 +977,8 @@ export class Video {
   seek: HTMLInputElement;
   seekTooltip: HTMLDivElement;
   rangeBar: RangeBar;
+  statisticsBar: HTMLDivElement;
+  statisticsSvg: SVGSVGElement;
   volume: HTMLInputElement;
   volumeButton: HTMLButtonElement;
   volumeIcons: SVGSVGElement;
@@ -932,6 +991,10 @@ export class Video {
   indexSelectHandlers: IndexSelectHandler[] = [];
   indexerIndex = -1;
   indexerSize = 0;
+  statsSelector: HTMLButtonElement;
+  statsSelectorPannel: SelectorPannel<string>;
+  stats = '';
+  statsData: Record<string, Array<[number, number]>> = {};
   speedSelector: HTMLButtonElement;
   speedSelectorPannel: SelectorPannel<number>;
   speed = 1;
@@ -971,6 +1034,12 @@ export class Video {
     this.rangeBar = new RangeBar(
       this.container.querySelector('div.range-bar')! as HTMLDivElement
     );
+    this.statisticsBar = this.container.querySelector(
+      'div.statistics-container'
+    )! as HTMLDivElement;
+    this.statisticsSvg = this.statisticsBar.querySelector(
+      'svg'
+    )! as SVGSVGElement;
     this.volume = this.container.querySelector(
       'input.volume'
     )! as HTMLInputElement;
@@ -993,6 +1062,29 @@ export class Video {
     this.indexSelector = this.container.querySelector(
       'button.index-selector'
     )! as HTMLButtonElement;
+    this.statsSelector = this.container.querySelector(
+      'button.stats-selector'
+    )! as HTMLButtonElement;
+    this.statsSelectorPannel = new SelectorPannel<string>([]).install(
+      this.statsSelector,
+      (option) => {
+        const text = this.statsSelector.querySelector(
+          'div.text'
+        )! as HTMLDivElement;
+        text.innerText = option.label;
+        this.stats = option.value;
+        if (this.video.duration > 0) {
+          makeLineChart(
+            this.statisticsSvg,
+            this.statsData[this.stats],
+            [0, this.video.duration],
+            undefined,
+            this.video.clientWidth - 20,
+            30
+          );
+        }
+      }
+    );
     this.speedSelector = this.container.querySelector(
       'button.speed-selector'
     )! as HTMLButtonElement;
@@ -1011,7 +1103,7 @@ export class Video {
     this.channelSelector = this.container.querySelector(
       'button.channel-selector'
     )! as HTMLButtonElement;
-    this.channelSelectorPannel = new SelectorPannel([]).install(
+    this.channelSelectorPannel = new SelectorPannel<string>([]).install(
       this.channelSelector,
       (option) => {
         const text = this.channelSelector.querySelector(
@@ -1071,6 +1163,27 @@ export class Video {
 
   removeVideoInitHandler = (handler: VideoInitHandler): void => {
     arrayRemove(this.videoInitHandlers, handler);
+  };
+
+  updateStatistics = (
+    statistics: Record<string, Array<[number, number]>> = {}
+  ): void => {
+    this.statsData = statistics;
+    const keys = Object.keys(statistics);
+    if (keys.length > 0) {
+      this.statsSelector.classList.remove('hidden');
+      this.statsSelectorPannel.updateView(
+        keys.map((key) => ({ label: key, value: key }))
+      );
+      this.statisticsBar.classList.remove('unused');
+      if (!arrayInclude(keys, this.stats)) {
+        this.statsSelectorPannel.select(keys[0]);
+      }
+    } else {
+      this.statsSelector.classList.add('hidden');
+      this.statsSelectorPannel.updateView([]);
+      this.statisticsBar.classList.add('unused');
+    }
   };
 
   updateChannels = (channels: string[] = []): void => {
@@ -1212,6 +1325,9 @@ export class Video {
     this.rangeBar.max = videoDuration;
     for (const handler of this.videoInitHandlers) {
       handler(this);
+    }
+    if (this.stats) {
+      this.statsSelectorPannel.select(this.stats);
     }
   };
 
@@ -1385,6 +1501,10 @@ export class Video {
     this.rangeBar.toggle();
   };
 
+  toggleStatisticsBar = (): void => {
+    this.statisticsBar.classList.toggle('hidden');
+  };
+
   // hideControls hides the video controls when not in use
   // if the video is paused, the controls must remain visible
   hideControls = (): void => {
@@ -1411,7 +1531,8 @@ export class Video {
       return;
     }
     const { key, ctrlKey, altKey, shiftKey } = event;
-    const { play, mute, fullscreen, pip, range } = this.options.shortcuts;
+    const { play, mute, fullscreen, pip, range, stats } =
+      this.options.shortcuts;
     if (
       key === play.key &&
       (play.ctrl === !!ctrlKey ||
@@ -1455,6 +1576,13 @@ export class Video {
         range.shift === !!shiftKey)
     ) {
       this.toggleRangeBar();
+    } else if (
+      key === stats.key &&
+      (stats.ctrl === !!ctrlKey ||
+        stats.alt === !!altKey ||
+        stats.shift === !!shiftKey)
+    ) {
+      this.toggleStatisticsBar();
     }
   };
 }

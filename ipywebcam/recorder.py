@@ -24,7 +24,7 @@ from ipywidgets import DOMWidget
 from traitlets import List, Float, Bool, Int, CUnicode, Unicode
 
 from ._frontend import module_name, module_version
-from .common import BaseWidget, normpath, makesure_path
+from .common import BaseWidget, normpath, makesure_path, bin_search, order_insert
 from .webcam import MT, MediaTransformer, WebCamWidget
 
 logger = logging.getLogger("ipywebcam")
@@ -79,15 +79,29 @@ class RecordVideoFrameTransformer(RecordFrameTransformer[VideoFrame]):
     
 class RecordAudioFrameTransformer(RecordFrameTransformer[AudioFrame]):
     kind: str = 'audio'
+    
+def fix_time_transformer(frame: MT, record: "Record", context: dict):
+    if "__inited__" not in context:
+        context["__inited__"] = True
+        if frame.pts > 0:
+            offset = context["offset"] = frame.pts
+        else:
+            offset = 0
+    else:
+        offset = context.get("offset")
+        offset = 0 if offset is None else offset
+    if offset > 0:
+        pass
+        frame.pts -= offset
+    return frame
 
 class Record:
     file: str | IO
     format: str | None
     options: dict[str, str] | None
     meta: dict[str, str] | None
-    external_meta: dict[str, str]
+    external_meta: dict[str, bool]
     cached_external_meta: dict[str, AnyType]
-    
     
     __container: AnyType | None = None
     __mode: str | None = None
@@ -98,13 +112,25 @@ class Record:
         format: str | None=None,
         options: dict[str, str] | None=None,
         meta: dict[str, str] | None=None,
-        external_meta:dict[str, str] | None=None,
+        external_meta: list[str] | None=None,
     ) -> None:
         self.file = file
         self.format = format
         self.options = options
-        self.meta = meta
-        self.external_meta = external_meta
+        self.meta = meta if meta is not None else {}
+        self.external_meta = { name: False for name in external_meta } if external_meta is not None else {}
+        self.cached_external_meta = {}
+        
+    def flush(self) -> None:
+        for name in self.external_meta:
+            if self.external_meta[name]:
+                meta_path = self.calc_external_meta_path(name)
+                cachecd = self.cached_external_meta[name]
+                if cachecd is not None:
+                    with open(meta_path, 'w') as f:
+                        json.dump(cachecd, f)
+                    self.external_meta[name] = False
+                    
     
     def to_url(self, base: str = None) -> str:
         query = {}
@@ -118,7 +144,7 @@ class Record:
                 query[f"meta.{key}"] = self.meta[key]
         if self.external_meta:
             for key in self.external_meta.keys():
-                query[f"emeta.{key}"] = self.external_meta[key]
+                query[f"emeta.{key}"] = True
         base = '' if base is None else base
         url = normpath(path.relpath(normpath(self.file_path), normpath(base)))
         return urlunparse(('', '', url, '', urlencode(query=query), ''))
@@ -159,43 +185,100 @@ class Record:
     def file_path(self):
         return self.file if isinstance(self.file, str) else path.normpath(self.file.name)
     
-    def make_full_path(self, p: str) -> str:
-        return path.normpath(path.join(path.dirname(self.file_path.replace('\\', '/')), p.replace('\\', '/')))
+    def calc_external_meta_path(self, name:str) -> str:
+        return f"{self.file_path}.meta.{name}"
     
     def set_meta(self, name: str, value: AnyType) -> None:
         if value is None:
-            del self.meta[name]
+            if name in self.meta:
+                del self.meta[name]
         else:
             self.meta[name] = json.dumps(value)
         
-    def set_external_meta(self, name: str, value: AnyType) -> None:
-        meta_path = f"{self.file_path}.meta.{name}"
-        relative_meta_path = path.basename(meta_path.replace('\\', '/'))
+    def set_external_meta(self, name: str, value: AnyType, flush: bool=True) -> None:
+        meta_path = self.calc_external_meta_path(name)
         if value is None:
-            del self.external_meta[name]
-            del self.cached_external_meta[name]
+            if name in self.external_meta:
+                del self.external_meta[name]
+            if name in self.cached_external_meta:
+                del self.cached_external_meta[name]
             if path.exists(meta_path):
                 os.remove(meta_path)
         else:
-            self.external_meta[name] = meta_path
             self.cached_external_meta[name] = value
-            with open(meta_path, 'w') as f:
-                json.dump(value, f)
+            if flush:
+                with open(meta_path, 'w') as f:
+                    json.dump(value, f)
+                self.external_meta[name] = False
+            else:
+                self.external_meta[name] = True
                 
-    def get_meta(self, name: str) -> AnyType:
-        if name in self.meta:
+    def get_meta(self, name: str, external: bool | None = None) -> AnyType:
+        if name in self.meta and not external: # external == None or external == False
             return json.loads(self.meta[name])
-        elif name in self.external_meta:
+        elif name in self.external_meta and (external is None or external == True):
             if name in self.cached_external_meta:
                 return self.cached_external_meta[name]
             else:
-                meta_path = self.make_full_path(self.external_meta[name])
+                meta_path = self.calc_external_meta_path(name)
+                if not path.exists(meta_path):
+                    return None
                 with open(meta_path, 'r') as f:
                     data = json.load(f)
                 self.cached_external_meta[name] = data
                 return data
         else:
             return None
+        
+    def is_external_meta(self, name:str) -> bool | None:
+        """check whether a meta is external meta, simple meta or not exists
+
+        Args:
+            name (str): the name of the meta
+
+        Returns:
+            bool | None: True means external meta, False means simple meta, None means not a meta.
+        """        
+        if name in self.external_meta:
+            return True
+        elif name in self.meta:
+            return False
+        else:
+            return None
+        
+    def set_statistics(self, name: str, time: float, value: float | None, external: bool | None = None, flush: bool=True, only_update=False) -> float | None:
+        external_check = self.is_external_meta('statistics')
+        if external is None:
+            external = False if not external_check else True
+                
+        statistics = self.get_meta('statistics', external)
+        if statistics is None:
+            if value is None or only_update:
+                return None
+            statistics = {}
+        stats: list[tuple[float, float]] = statistics.get(name)
+        if stats is None:
+            if value is None or only_update:
+                return None
+            statistics[name] = []
+            stats: list[tuple[float, float]] = statistics[name]
+        index = bin_search(stats, time, lambda v: v[0])
+        if index == -1:
+            if value is None:
+                return None
+            old = None
+        else:
+            old = stats[index][1]
+        if value is None:
+            stats.remove(old)
+        else:
+            order_insert(stats, (time, value), lambda v: v[0])
+        if external:
+            self.set_external_meta('statistics', statistics, flush)
+        else:
+            self.set_meta('statistics', statistics)
+        return old
+            
     
     async def on_frame(self, frame: VideoFrame | AudioFrame, ctx: dict, track: MediaStreamTrack, post: bool):
         context: RecorderContext = self.__tracks.get(track)
@@ -239,9 +322,17 @@ class Record:
         out_stream.height = stream.height  # Set frame height to be the same as the height of the input stream
         out_stream.pix_fmt = stream.pix_fmt  # Copy pixel format from input stream to output stream
         return out_stream
+    
+    @staticmethod
+    def create_video_frame_transformer(callback: FrameTransformerCallback, context: dict | None=None) -> RecordVideoFrameTransformer:
+        return RecordVideoFrameTransformer(callback=callback, context=context)
+    
+    @staticmethod
+    def create_audio_frame_transformer(callback: FrameTransformerCallback, context: dict | None=None) -> RecordAudioFrameTransformer:
+        return RecordAudioFrameTransformer(callback=callback, context=context)
             
-    def read(self, transformers: list[RecordFrameTransformer] | None=None) -> bytes:
-        if transformers is None or len(transformers) == 0:
+    def read(self, transformers: list[RecordFrameTransformer] | None=None, fix_time: bool=True) -> bytes:
+        if not fix_time and transformers is None or len(transformers) == 0:
             with open(file=self.file, mode='rb') as f:
                 return f.read()
         else:
@@ -249,8 +340,12 @@ class Record:
                 transformer.clear()
             video_transformers = [transformer for transformer in transformers if transformer.kind == "video"]
             logger.debug(f'got video transformers {len(video_transformers)}')
+            if fix_time:
+                video_transformers.insert(0, RecordVideoFrameTransformer(fix_time_transformer))
             audio_transformers = [transformer for transformer in transformers if transformer.kind == "audio"]
             logger.debug(f'got audio transformers {len(video_transformers)}')
+            if fix_time:
+                audio_transformers.insert(0, RecordAudioFrameTransformer(fix_time_transformer))
             out = BytesIO()
             with av_open(file=self.file, mode='r', format=self.format, options=self.options) as input_f:
                 with av_open(file=out, mode='w', format="mp4") as out_f:
@@ -293,6 +388,21 @@ class RecordConditionContext:
     on_frame: Callable[[VideoFrame | AudioFrame, dict, MediaStreamTrack], None] | None = None
     
 class RecordFactory(metaclass=ABCMeta):
+    __index: int
+    __count: int
+    
+    def __iter__(self) -> "RecordFactory":
+        self.__index = -1
+        self.__count = self.record_count()
+        return self
+    
+    def __next__(self) -> Record:
+        self.__index += 1
+        if self.__index >= self.__count:
+            raise StopIteration
+        else:
+            return self.get_record(self.__index)
+    
     @abstractmethod
     def load(self) -> "RecordFactory":
         pass
@@ -625,6 +735,8 @@ class FileListFactory(RecordFactory):
         self._ensure_open()
         if self.flush_when_close:
             self.flush()
+        for record in self:
+            record.flush()
         record_list_path = self._full_path(f'{self.name}.record_list')
         makesure_path(record_list_path)
         with open(record_list_path, 'w') as f:
@@ -658,7 +770,7 @@ class FileListFactory(RecordFactory):
         format: str | None = None
         options: dict[str, str] = {}
         meta: dict[str, str] = {}
-        external_meta: dict[str, str] = {}
+        external_meta: list[str] = []
         if res.query:
             query = parse_qs(res.query)
             if "format" in query and query['format']:
@@ -668,8 +780,8 @@ class FileListFactory(RecordFactory):
                     options[key[8:]] = str(query[key][0])
                 elif key.startswith("meta.") and query[key]:
                     meta[key[5:]] = str(query[key][0])
-                elif key.startswith("emeta.") and query[key]:
-                    external_meta[key[6:]] = str(query[key][0])
+                elif key.startswith("emeta."):
+                    external_meta.append(key[6:])
             
         return Record(file=self._full_path(res.path), format=format, options=options, meta=meta, external_meta=external_meta)
     
@@ -811,20 +923,6 @@ class WebCamRecorder:
     def stop(self) -> None:
         asyncio.create_task(self.a_stop())
         
-def fix_time_transformer(frame: MT, record: Record, context: dict):
-    if "__inited__" not in context:
-        context["__inited__"] = True
-        if frame.pts > 0:
-            offset = context["offset"] = frame.pts
-        else:
-            offset = 0
-    else:
-        offset = context.get("offset")
-        offset = 0 if offset is None else offset
-    if offset > 0:
-        pass
-        frame.pts -= offset
-    return frame
 
 class RecordPlayer(DOMWidget, BaseWidget):
     
@@ -842,6 +940,7 @@ class RecordPlayer(DOMWidget, BaseWidget):
     selected_index = Int(default_value=None, allow_none=True).tag(sync=True)
     selected_channel = Unicode(default_value=None, allow_none=True).tag(sync=True)
     selected_range = List(Float, default_value=[0, 0], minlen=2, maxlen=2).tag(sync=True)
+    fix_time: bool
     __base_transformers: list[RecordFrameTransformer]
     __channel_transformers: dict[str, list[RecordFrameTransformer]]
     
@@ -853,9 +952,7 @@ class RecordPlayer(DOMWidget, BaseWidget):
         self.add_answer("fetch_meta", self.answer_fetch_meta)
         self.add_answer("fetch_data", self.answer_fetch_data)
         self.add_answer("set_markers", self.answer_set_markers)
-        if fix_time:
-            self.add_video_transformer(fix_time_transformer)
-            self.add_audio_transformer(fix_time_transformer)
+        self.fix_time = fix_time
         
     def add_transformer(self, type: str, callback: FrameTransformerCallback, channel: str | None=None) -> RecordFrameTransformer:
         if type == "video":
@@ -914,18 +1011,28 @@ class RecordPlayer(DOMWidget, BaseWidget):
         return transformers
     
     def get_markers(self, index: int) -> list[float] | None:
-        logger.debug(f'[get_markers] index: {index}')
         record = self.recorder.factory.get_record(index=index)
         if not record:
             return None
         return record.get_meta('markers')
     
     def set_markers(self, index: int, markers: list[float]) -> None:
-        logger.debug(f'[set_markers] index: {index}, markers: {markers}')
         record = self.recorder.factory.get_record(index=index)
         if not record:
             return
         record.set_meta('markers', markers)
+        
+    def get_statistics(self, index: int) -> dict[str, list[tuple[float, float]]] | None:
+        record = self.recorder.factory.get_record(index=index)
+        if not record:
+            return None
+        return record.get_meta('statistics')
+    
+    def set_statistics(self, index: int, statistics: dict[str, list[tuple[float, float]]]) -> None:
+        record = self.recorder.factory.get_record(index=index)
+        if not record:
+            return
+        record.set_meta('statistics', statistics)
         
     def _get_media_data(self, index: int, channel: str) -> bytes | None:
         logger.debug(f'get media data for index {index} and channel {channel}')
@@ -933,7 +1040,7 @@ class RecordPlayer(DOMWidget, BaseWidget):
         if not record:
             return None
         transformers = self.get_transformers(channel=channel)
-        return record.read(transformers=transformers)
+        return record.read(transformers=transformers, fix_time=self.fix_time)
         
     
     def answer_fetch_meta(self, id: str, cmd: str, args: dict) -> None:
@@ -944,6 +1051,7 @@ class RecordPlayer(DOMWidget, BaseWidget):
         if "index" in args:
             index = args["index"]
             meta["markers"] = self.get_markers(index=index)
+            meta["statistics"] = self.get_statistics(index=index)
         self.answer(cmd=cmd, target_id=id, content=meta)
     
     def answer_fetch_data(self, id: str, cmd: str, args: dict) -> None:
