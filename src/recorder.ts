@@ -4,29 +4,12 @@ import LRU from 'lru-cache';
 import { BaseModel } from './common';
 import { Video } from './video';
 import { arrayEqual } from './utils';
-
-type ChannelStaleArgs = {
-  channel?: string;
-};
-
-type RecorderMsgTypeMap = {
-  channel_stale: ChannelStaleArgs;
-};
-
-type FetchCallback = (blob: Blob) => void;
-
-interface FetchState {
-  callbacks: Array<FetchCallback>;
-}
-
-type RefreshCallback = (index?: number, channel?: string) => void;
-
-interface RecorderMeta {
-  record_count: number;
-  chanels: string[];
-  markers?: number[];
-  statistics?: Record<string, Array<[number, number]>>;
-}
+import {
+  RecorderMsgTypeMap,
+  FetchState,
+  RefreshCallback,
+  RecorderMeta,
+} from './types';
 
 export class RecorderPlayerModel extends BaseModel<RecorderMsgTypeMap> {
   cache: LRU<string, Blob> = new LRU({
@@ -175,7 +158,8 @@ export class RecorderPlayerView extends DOMWidgetView {
   channel = '';
   channels: string[] = [];
   markers?: number[];
-  statistics?: RecorderMeta['statistics'];
+  statistics: RecorderMeta['statistics'];
+  statistics_meta: RecorderMeta['statistics_meta'];
   private loading = false;
   private loadStateOnceCallbacks: LoadStateCallback[] = [];
   selectedRange: [number, number] = [0, 0];
@@ -220,11 +204,13 @@ export class RecorderPlayerView extends DOMWidgetView {
       chanels = [],
       markers,
       statistics,
+      statistics_meta,
     } = await this.model.fetchMeta(index);
     this.indexSize = record_count;
     this.channels = chanels;
     this.markers = markers;
     this.statistics = statistics;
+    this.statistics_meta = statistics_meta;
   };
 
   initVideo = async (): Promise<void> => {
@@ -366,7 +352,7 @@ export class RecorderPlayerView extends DOMWidgetView {
         this.video.updateIndexerSize(this.indexSize);
         this.video.updateIndexerIndex(this.index);
         this.video.updateChannels(this.channels);
-        this.video.updateStatistics(this.statistics);
+        this.video.updateStatistics(this.statistics, this.statistics_meta);
       } catch (e) {
         console.error(e);
       } finally {

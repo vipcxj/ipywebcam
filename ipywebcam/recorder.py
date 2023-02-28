@@ -13,7 +13,7 @@ from io import BytesIO
 from os import path
 from typing import IO
 from typing import Any as AnyType
-from typing import Callable, Generic, Tuple
+from typing import Callable, Generic, Tuple, TypeVar
 from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
 
 from aiortc import RTCPeerConnection
@@ -94,6 +94,8 @@ def fix_time_transformer(frame: MT, record: "Record", context: dict):
         pass
         frame.pts -= offset
     return frame
+
+V = TypeVar('V')
 
 class Record:
     file: str | IO
@@ -188,14 +190,14 @@ class Record:
     def calc_external_meta_path(self, name:str) -> str:
         return f"{self.file_path}.meta.{name}"
     
-    def set_meta(self, name: str, value: AnyType) -> None:
+    def _set_meta(self, name: str, value: AnyType) -> None:
         if value is None:
             if name in self.meta:
                 del self.meta[name]
         else:
             self.meta[name] = json.dumps(value)
         
-    def set_external_meta(self, name: str, value: AnyType, flush: bool=True) -> None:
+    def _set_external_meta(self, name: str, value: AnyType, flush: bool=True) -> None:
         meta_path = self.calc_external_meta_path(name)
         if value is None:
             if name in self.external_meta:
@@ -212,6 +214,17 @@ class Record:
                 self.external_meta[name] = False
             else:
                 self.external_meta[name] = True
+                
+    def set_meta(self, name: str, value: AnyType, external: bool | None = None, flush: bool=True) -> AnyType:
+        external_check = self.is_external_meta(name)
+        if external is None:
+            external = False if not external_check else True
+        old = self.get_meta(name, external)
+        if external:
+            self._set_external_meta(name, value, flush)
+        else:
+            self._set_meta(name, value)
+        return old
                 
     def get_meta(self, name: str, external: bool | None = None) -> AnyType:
         if name in self.meta and not external: # external == None or external == False
@@ -246,11 +259,32 @@ class Record:
         else:
             return None
         
-    def set_statistics(self, name: str, time: float, value: float | None, external: bool | None = None, flush: bool=True, only_update=False) -> float | None:
-        external_check = self.is_external_meta('statistics')
-        if external is None:
-            external = False if not external_check else True
-                
+    def get_statistics_dict(self, external: bool | None = None) -> dict[str, list[tuple[float, float]]]:
+        statistics_dict = self.get_meta('statistics', external)
+        return statistics_dict if statistics_dict is not None else {}
+    
+    def set_statistics_dict(self, data: dict[str, list[tuple[float, float]]] | None, external: bool | None = None, flush: bool=True) -> dict[str, list[tuple[float, float]]] | None:
+        return self.set_meta('statistics', data, external, flush)
+        
+    def set_statistics(self, name: str, data: list[tuple[float, float] | list[float]] | None, external: bool | None = None, flush: bool=True, only_update=False) -> list[tuple[float, float]] | None:
+        statistics: dict[str, list[tuple[float, float]]] = self.get_meta('statistics', external)
+        if statistics is None:
+            if data is None or only_update:
+                return None
+            statistics = {}
+        old = statistics.get(name)
+        if data is None and old is not None:
+            del statistics[name]
+        elif data is not None:
+            statistics[name] = [(d[0], d[1]) for d in data]
+        self.set_meta('statistics', statistics, external, flush)
+        return old
+    
+    def get_statistics(self, name: str, external: bool | None = None) -> list[tuple[float, float]] | None:
+        statistics_dict = self.get_statistics_dict(self, external)
+        return statistics_dict.get(name) if statistics_dict is not None else None
+        
+    def set_statistics_item(self, name: str, time: float, value: float | None, external: bool | None = None, flush: bool=True, only_update=False) -> float | None:
         statistics = self.get_meta('statistics', external)
         if statistics is None:
             if value is None or only_update:
@@ -273,11 +307,58 @@ class Record:
             stats.remove(old)
         else:
             order_insert(stats, (time, value), lambda v: v[0])
-        if external:
-            self.set_external_meta('statistics', statistics, flush)
-        else:
-            self.set_meta('statistics', statistics)
+        self.set_meta('statistics', statistics, external, flush)
         return old
+    
+    def get_statistics_meta_dict(self) ->  dict[str, dict[str, AnyType]]:
+        statistics_meta_dict: dict[str, dict[str, AnyType]] | None = self.get_meta('statistics.meta', False)
+        return statistics_meta_dict if statistics_meta_dict is not None else {}
+    
+    def set_statistics_meta_dict(self, meta_dict: dict[str, dict[str, AnyType]] | None) -> dict[str, dict[str, AnyType]] | None:
+        return self.set_meta('statistics.meta', meta_dict, False)
+    
+    def set_statistics_meta(self, stats_name: str, data: dict[str, AnyType] | None) -> dict[str, AnyType] | None:
+        statistics_meta_dict: dict[str, dict[str, AnyType]] | None = self.get_meta('statistics.meta', False)
+        if statistics_meta_dict is None:
+            if data is None:
+                return None
+            statistics_meta_dict = {}
+        old = statistics_meta_dict.get(stats_name)
+        if data is None and old is not None:
+            del statistics_meta_dict[stats_name]
+        elif data is not None:
+            statistics_meta_dict[stats_name] = data
+        self._set_meta('statistics.meta', statistics_meta_dict)
+        return old
+    
+    def get_statistics_meta(self, stats_name: str) -> dict[str, AnyType]:
+        meta_dict = self.get_statistics_meta_dict()
+        metaes = meta_dict.get(stats_name)
+        return metaes if metaes is not None else {}
+    
+    def set_statistics_meta_item(self, stats_name: str, meta_name: str, value: AnyType) -> AnyType:
+        statistics_meta_dict: dict[str, dict[str, AnyType]] = self.get_meta('statistics.meta', False)
+        if statistics_meta_dict is None:
+            if value is None:
+                return None
+            statistics_meta_dict = {}
+        statistics_metaes = statistics_meta_dict.get(stats_name)
+        if statistics_metaes is None:
+            if value is None:
+                return None
+            statistics_meta_dict[stats_name] = {}
+            statistics_metaes = statistics_meta_dict[stats_name]
+        old = statistics_metaes.get(meta_name)
+        if value is None and old is not None:
+            del statistics_metaes[meta_name]
+        elif value is not None:
+            statistics_metaes[meta_name] = value
+        self._set_meta('statistics.meta', statistics_meta_dict)
+        return old
+    
+    def get_statistics_meta_item(self, stats_name: str, meta_name: str) -> AnyType:
+        metaes = self.get_statistics_meta(stats_name)
+        return metaes.get(meta_name)
             
     
     async def on_frame(self, frame: VideoFrame | AudioFrame, ctx: dict, track: MediaStreamTrack, post: bool):
@@ -1022,17 +1103,29 @@ class RecordPlayer(DOMWidget, BaseWidget):
             return
         record.set_meta('markers', markers)
         
-    def get_statistics(self, index: int) -> dict[str, list[tuple[float, float]]] | None:
+    def get_statistics(self, index: int) -> dict[str, list[tuple[float, float]]]:
         record = self.recorder.factory.get_record(index=index)
         if not record:
             return None
-        return record.get_meta('statistics')
+        return record.get_statistics_dict()
     
     def set_statistics(self, index: int, statistics: dict[str, list[tuple[float, float]]]) -> None:
         record = self.recorder.factory.get_record(index=index)
         if not record:
             return
-        record.set_meta('statistics', statistics)
+        record.set_statistics_dict(statistics)
+        
+    def get_statistics_meta(self, index: int) -> dict[str, dict[str, AnyType]]:
+        record = self.recorder.factory.get_record(index=index)
+        if not record:
+            return None
+        return record.get_statistics_meta_dict()
+    
+    def set_statistics_meta(self, index: int, statistics_meta: dict[str, dict[str, AnyType]]) -> None:
+        record = self.recorder.factory.get_record(index=index)
+        if not record:
+            return
+        record.set_statistics_meta_dict(statistics_meta)
         
     def _get_media_data(self, index: int, channel: str) -> bytes | None:
         logger.debug(f'get media data for index {index} and channel {channel}')
@@ -1052,6 +1145,7 @@ class RecordPlayer(DOMWidget, BaseWidget):
             index = args["index"]
             meta["markers"] = self.get_markers(index=index)
             meta["statistics"] = self.get_statistics(index=index)
+            meta["statistics_meta"] = self.get_statistics_meta(index=index)
         self.answer(cmd=cmd, target_id=id, content=meta)
     
     def answer_fetch_data(self, id: str, cmd: str, args: dict) -> None:

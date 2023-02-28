@@ -4,6 +4,7 @@ import '../css/video.css';
 import { makeLineChart } from './charts';
 import { RangeBar } from './range';
 import { arrayInclude, arrayRemove } from './utils';
+import { RecorderMeta } from './types';
 
 const svgNS = 'http://www.w3.org/2000/svg';
 const prefix = 'ipywebcam-video-';
@@ -994,7 +995,8 @@ export class Video {
   statsSelector: HTMLButtonElement;
   statsSelectorPannel: SelectorPannel<string>;
   stats = '';
-  statsData: Record<string, Array<[number, number]>> = {};
+  statsData: Required<RecorderMeta>['statistics'] = {};
+  statsMeta: Required<RecorderMeta>['statistics_meta'] = {};
   speedSelector: HTMLButtonElement;
   speedSelectorPannel: SelectorPannel<number>;
   speed = 1;
@@ -1078,7 +1080,7 @@ export class Video {
             this.statisticsSvg,
             this.statsData[this.stats],
             [0, this.video.duration],
-            undefined,
+            this.statsMeta[this.stats]?.y_range,
             this.video.clientWidth - 20,
             30
           );
@@ -1166,9 +1168,11 @@ export class Video {
   };
 
   updateStatistics = (
-    statistics: Record<string, Array<[number, number]>> = {}
+    statistics: RecorderMeta['statistics'] = {},
+    statistics_meta: RecorderMeta['statistics_meta'] = {}
   ): void => {
     this.statsData = statistics;
+    this.statsMeta = statistics_meta;
     const keys = Object.keys(statistics);
     if (keys.length > 0) {
       this.statsSelector.classList.remove('hidden');
