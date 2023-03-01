@@ -6,6 +6,7 @@
 
 from .webcam import WebCamWidget
 from .recorder import WebCamRecorder, Record, RecordFactory, FileListFactory, SingleFileFactory, TrackStrategy, RecordPlayer
+from .common import ContextHelper
 from ._version import __version__, version_info
 
 def _jupyter_labextension_paths():

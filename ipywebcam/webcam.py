@@ -11,9 +11,10 @@ TODO: Add module docstring
 import asyncio
 import inspect
 import logging
+import sys
 import uuid
 from abc import ABCMeta, abstractmethod
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass, field
 from os import path
 from threading import RLock
@@ -24,26 +25,18 @@ from aiortc import (RTCConfiguration, RTCIceServer, RTCPeerConnection,
                     RTCSessionDescription)
 from aiortc.contrib.media import MediaRelay, MediaStreamTrack
 from av import AudioFrame, VideoFrame
-from ipywidgets import DOMWidget, Dropdown
+from IPython import display
+from ipywidgets import DOMWidget, Dropdown, Output
 from traitlets import Any, Bool, Dict, Enum, Float, List, Unicode, link
 
-from .common import BaseWidget
 from ._frontend import module_name, module_version
+from .common import OutputContextManager, BaseWidget, ContextHelper
 
 logger = logging.getLogger("ipywebcam")
 logger.setLevel(logging.DEBUG)
 fh = logging.FileHandler(path.join(path.dirname(__file__), "ipywebcam.log"))
 fh.setLevel(logging.DEBUG)
 logger.addHandler(fh)
-my_loop = False
-try:
-    loop = asyncio.get_running_loop()
-    logger.debug("using exist loop.")
-except RuntimeError:
-    loop = asyncio.get_event_loop()
-    my_loop = True
-    logger.debug("create new loop.")
-
 
 logger.info("I am loaded")
 
@@ -51,6 +44,7 @@ relay = MediaRelay()
 
 MT = TypeVar('MT', VideoFrame, AudioFrame)
 class MediaTransformer(Generic[MT]):
+    enabled: bool = True
     def __init__(self, callback: Callable[[MT, dict, MediaStreamTrack], Union[MT, Awaitable[MT]]], context: dict | None = None) -> None:
         self.callback = callback
         self.context = context if context is not None else {}
@@ -60,6 +54,8 @@ class MediaTransformer(Generic[MT]):
         self.require_track = len(sig.parameters) > 2
         
     async def transform(self, frame: MT, track: MediaStreamTrack=None) -> MT | None:
+        if not self.enabled:
+            return frame
         if self.iscoroutinefunction:
             if self.require_ctx and self.require_track:
                 out_frame = await self.callback(frame, self.context, track)
@@ -90,33 +86,42 @@ class WithMediaTransformers:
         self.audio_posters = []
 
 class MediaTransformTrack(MediaStreamTrack, Generic[MT], metaclass=ABCMeta):
+    output: Output | None
     
-    def __init__(self, track: MediaStreamTrack, withTransformers: WithMediaTransformers):
+    def __init__(self, track: MediaStreamTrack, withTransformers: WithMediaTransformers, output: Output | None = None):
         super().__init__()
         self.track = track
         self.withTransformers = withTransformers
+        self.output = output
         
     async def recv(self) -> MT:
         frame: MT = await self.track.recv()
         org_frame = frame
-        try:
-            for transformer in self.__class__.get_transformers(self.withTransformers):
-                transformer.context["_org_frame_"] = org_frame
-                out_frame = await transformer.transform(frame=frame, track=self.track)
-                frame = out_frame if out_frame is not None else frame
+        output_context_manager = OutputContextManager(self.output) if self.output is not None else nullcontext
+        for transformer in self.__class__.get_transformers(self.withTransformers):
+            out_frame = None
+            transformer.context[ContextHelper.KEY_ORG_FRAME] = org_frame
+            try:
+                async with output_context_manager:
+                    out_frame = await transformer.transform(frame=frame, track=self.track)
+            except Exception:
+                transformer.enabled = False
+            frame = out_frame if out_frame is not None else frame
+            
+        if org_frame is not None and frame is not None:
+            if hasattr(org_frame, "pts") and hasattr(frame, "pts") and frame.pts is None:
+                frame.pts = org_frame.pts
+            if hasattr(org_frame, "time_base") and hasattr(frame, "time_base") and frame.time_base is None:
+                frame.time_base = org_frame.time_base
                 
-            if org_frame is not None and frame is not None:
-                if hasattr(org_frame, "pts") and hasattr(frame, "pts") and frame.pts is None:
-                    frame.pts = org_frame.pts
-                if hasattr(org_frame, "time_base") and hasattr(frame, "time_base") and frame.time_base is None:
-                    frame.time_base = org_frame.time_base
-                    
-            for poster in self.__class__.get_posters(self.withTransformers):
-                poster.context["_org_frame_"] = org_frame
-                await poster.transform(frame=frame, track=self.track)
-            return frame
-        except Exception as e:
-            logger.exception(e)
+        for poster in self.__class__.get_posters(self.withTransformers):
+            poster.context[ContextHelper.KEY_ORG_FRAME] = org_frame
+            try:
+                async with output_context_manager:
+                    await poster.transform(frame=frame, track=self.track)
+            except Exception:
+                poster.enabled = False
+        return frame
     
     @staticmethod        
     @abstractmethod
@@ -391,9 +396,9 @@ class State:
                 def on_track(track):
                     self.log_info(f"[{id}] Track {track.kind} received")
                     if track.kind == "video":
-                        pc.addTrack(relay.subscribe(VideoTransformTrack(track, self.widget)))
+                        pc.addTrack(relay.subscribe(VideoTransformTrack(track, self.widget, self.widget.output)))
                     elif track.kind == "audio":
-                        pc.addTrack(relay.subscribe(AudioTransformTrack(track, self.widget)))
+                        pc.addTrack(relay.subscribe(AudioTransformTrack(track, self.widget, self.widget.output)))
                     with self.widget.lock:
                         asyncio.gather(*[callback(track, pc) for callback in self.widget.track_callbacks])
                         self.track_map.video.append(track)
@@ -432,6 +437,8 @@ class WebCamWidget(DOMWidget, BaseWidget, WithMediaTransformers):
     * playsInline - Bool (default True)
     * muted - Bool (default False)
     """
+    output = Output()
+    
     _model_name = Unicode('WebCamModel').tag(sync=True)
     _view_name = Unicode('WebCamView').tag(sync=True)
      
@@ -559,7 +566,7 @@ class WebCamWidget(DOMWidget, BaseWidget, WithMediaTransformers):
         if "desc" in args:
             client_desc: dict[str, str] = args["desc"]
             state = self.get_or_create_state(id)
-            loop.create_task(state.exchange_peer(client_desc=client_desc))
+            asyncio.create_task(state.exchange_peer(client_desc=client_desc))
                 
     def answer_sync_device(self, id: str, cmd: str, args: dict):
         if "type" in args and "id" in args:
@@ -575,7 +582,7 @@ class WebCamWidget(DOMWidget, BaseWidget, WithMediaTransformers):
         Args:
             callback (Callable[[VideoFrame, dict], Union[VideoFrame, Awaitable[VideoFrame]] | None]): 
             a callback accept the frame and a context dict, and then return a processed frame. Support sync and async function.
-            The context dict contains key "_org_frame_" at least. It represent the original frame. The users can add their own data to the context dict.
+            The context dict contains key "__org_frame" at least. It represent the original frame. The users can add their own data to the context dict.
 
         Returns:
             MediaTransformer[VideoFrame]: A transformer instance which can be used to remove the callback by calling remove_video_transformer
@@ -601,7 +608,7 @@ class WebCamWidget(DOMWidget, BaseWidget, WithMediaTransformers):
         Args:
             callback (Callable[[VideoFrame, dict], None]): 
             a callback accept the frame and a context dict, Should not return anything. Support sync and async function.
-            The context dict contains key "_org_frame_" at least. It represent the original frame. The users can add their own data to the context dict.
+            The context dict contains key "__org_frame" at least. It represent the original frame. The users can add their own data to the context dict.
 
         Returns:
             MediaTransformer[VideoFrame]: A poster instance which can be used to remove the callback by calling remove_video_poster
@@ -652,7 +659,7 @@ class WebCamWidget(DOMWidget, BaseWidget, WithMediaTransformers):
         Args:
             callback (Callable[[AudioFrame, dict], None]): 
             a callback accept the frame and a context dict, Should not return anything. Support sync and async function.
-            The context dict contains key "_org_frame_" at least. It represent the original frame. The users can add their own data to the context dict.
+            The context dict contains key "__org_frame" at least. It represent the original frame. The users can add their own data to the context dict.
 
         Returns:
             MediaTransformer[AudioFrame]: A poster instance which can be used to remove the callback by calling remove_video_poster
@@ -712,6 +719,9 @@ class WebCamWidget(DOMWidget, BaseWidget, WithMediaTransformers):
     
     def close_peers(self):
         asyncio.gather(*[state.close() for state in self.state_map.values()])
+        
+    def _ipython_display_(self):
+        display.display(super(), self.output)
             
     def __del__(self):
         self.close_peers()

@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from enum import Enum
 from io import BytesIO
+from IPython import display
 from os import path
 from typing import IO
 from typing import Any as AnyType
@@ -20,11 +21,11 @@ from aiortc import RTCPeerConnection
 from aiortc.contrib.media import MediaStreamTrack
 from av import AudioFrame, VideoFrame
 from av import open as av_open
-from ipywidgets import DOMWidget
+from ipywidgets import DOMWidget, Output
 from traitlets import List, Float, Bool, Int, CUnicode, Unicode
 
 from ._frontend import module_name, module_version
-from .common import BaseWidget, normpath, makesure_path, bin_search, order_insert
+from .common import BaseWidget, ContextHelper, normpath, makesure_path, bin_search, order_insert
 from .webcam import MT, MediaTransformer, WebCamWidget
 
 logger = logging.getLogger("ipywebcam")
@@ -55,21 +56,38 @@ class RecordFrameTransformer(Generic[MT]):
         out = None
         pts = frame.pts
         time_base = frame.time_base
-        try:
-            if self.__use_context:
-                out = self.__callback(frame, record, self.__context)
-            elif self.__use_record:
-                out = self.__callback(frame, record)
-            else:
-                out = self.__callback(frame)
-        except Exception as e:
-            logger.exception(e)
+        
+        if self.__use_context:
+            out = self.__callback(frame, record, self.__context)
+        elif self.__use_record:
+            out = self.__callback(frame, record)
+        else:
+            out = self.__callback(frame)
+
         out = out if out is not None else frame
         if out.pts is None:
             out.pts = pts
         if out.time_base is None:
             out.time_base = time_base
         return out
+    
+    def get_context_value(self, key: str, default_value: AnyType=None) -> AnyType:
+        return self.__context.get(key) if default_value is None else self.__context.get(key, default_value)
+    
+    def set_context_value(self, key: str, value: AnyType) -> AnyType:
+        old = self.__context.get(key)
+        if value is None and old is not None:
+            del self.__context[key]
+        elif value is not None: 
+            self.__context[key] = value
+        return old
+    
+    def get_context_keys(self):
+        return self.__context.keys()
+    
+    @property
+    def callback(self) -> FrameTransformerCallback:
+        return self.__callback
     
     def clear(self) -> None:
         self.__context = {}
@@ -366,7 +384,7 @@ class Record:
         if not context:
             return
         if not post:
-            frame = ctx["_org_frame_"]
+            frame = ctx[ContextHelper.KEY_ORG_FRAME]
             
         if not context.started:
             # adjust the output size to match the first frame
@@ -413,12 +431,10 @@ class Record:
         return RecordAudioFrameTransformer(callback=callback, context=context)
             
     def read(self, transformers: list[RecordFrameTransformer] | None=None, fix_time: bool=True) -> bytes:
-        if not fix_time and transformers is None or len(transformers) == 0:
+        if not fix_time and (transformers is None or len(transformers)) == 0:
             with open(file=self.file, mode='rb') as f:
                 return f.read()
         else:
-            for transformer in transformers:
-                transformer.clear()
             video_transformers = [transformer for transformer in transformers if transformer.kind == "video"]
             logger.debug(f'got video transformers {len(video_transformers)}')
             if fix_time:
@@ -431,19 +447,25 @@ class Record:
             with av_open(file=self.file, mode='r', format=self.format, options=self.options) as input_f:
                 with av_open(file=out, mode='w', format="mp4") as out_f:
                     for stream in input_f.streams.video:
+                        for transformer in transformers:
+                            transformer.clear()
                         out_stream = self._new_stream_from(out_f, stream)
                         for frame in input_f.decode(stream):
+                            org_frame = frame
                             if stream.type == "video":
                                 for transformer in video_transformers:
+                                    transformer.set_context_value(ContextHelper.KEY_ORG_FRAME, org_frame)
                                     frame = transformer.transform(frame=frame, record=self)
                             elif stream.type == "audio":
                                 for transformer in audio_transformers:
+                                    transformer.set_context_value(ContextHelper.KEY_ORG_FRAME, org_frame)
                                     frame = transformer.transform(frame=frame, record=self)
                             try:
                                 for packet in out_stream.encode(frame):
                                     out_f.mux(packet)
                             except Exception as e:
                                 logger.exception(e)
+                                raise e
                                 
                         for packet in out_stream.encode(None):
                             out_f.mux(packet)
@@ -1007,6 +1029,7 @@ class WebCamRecorder:
 
 class RecordPlayer(DOMWidget, BaseWidget):
     
+    output = Output()
     _model_name = Unicode('RecorderPlayerModel').tag(sync=True)
     _view_name = Unicode('RecorderPlayerView').tag(sync=True)
     
@@ -1034,6 +1057,9 @@ class RecordPlayer(DOMWidget, BaseWidget):
         self.add_answer("fetch_data", self.answer_fetch_data)
         self.add_answer("set_markers", self.answer_set_markers)
         self.fix_time = fix_time
+        
+    def _ipython_display_(self):
+        display.display(super(), self.output)
         
     def add_transformer(self, type: str, callback: FrameTransformerCallback, channel: str | None=None) -> RecordFrameTransformer:
         if type == "video":
@@ -1127,6 +1153,7 @@ class RecordPlayer(DOMWidget, BaseWidget):
             return
         record.set_statistics_meta_dict(statistics_meta)
         
+    @output.capture()
     def _get_media_data(self, index: int, channel: str) -> bytes | None:
         logger.debug(f'get media data for index {index} and channel {channel}')
         record = self.recorder.factory.get_record(index=index)
