@@ -299,7 +299,7 @@ class Record:
         return old
     
     def get_statistics(self, name: str, external: bool | None = None) -> list[tuple[float, float]] | None:
-        statistics_dict = self.get_statistics_dict(self, external)
+        statistics_dict = self.get_statistics_dict(external)
         return statistics_dict.get(name) if statistics_dict is not None else None
         
     def set_statistics_item(self, name: str, time: float, value: float | None, external: bool | None = None, flush: bool=True, only_update=False) -> float | None:
