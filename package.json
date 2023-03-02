@@ -1,6 +1,6 @@
 {
   "name": "ipywebcam",
-  "version": "0.1.10",
+  "version": "0.1.11",
   "description": "A Custom Jupyter Widget Library for Web Camera using WebRTC",
   "keywords": [
     "jupyter",
