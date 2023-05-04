@@ -38,6 +38,8 @@ class RecorderContext:
         
 class Nothing:
     pass
+
+NOTHING: Nothing = Nothing()
         
 FrameTransformerCallback = Callable[[MT], MT | Nothing | None] | Callable[[MT, "Record"], MT | Nothing | None] | Callable[[MT, "Record", dict], MT | Nothing | None]
 
@@ -735,6 +737,7 @@ class FileListFactory(RecordFactory):
             return False
         return condition
         
+    @property
     def name(self) -> str:
         return self._name
         

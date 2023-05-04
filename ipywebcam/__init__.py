@@ -5,7 +5,7 @@
 # Distributed under the terms of the Modified BSD License.
 
 from .webcam import WebCamWidget
-from .recorder import WebCamRecorder, Record, RecordFactory, FileListFactory, SingleFileFactory, TrackStrategy, RecordPlayer
+from .recorder import WebCamRecorder, Record, RecordFactory, FileListFactory, SingleFileFactory, TrackStrategy, RecordPlayer, Nothing, NOTHING
 from .common import ContextHelper
 from ._version import __version__, version_info
 
