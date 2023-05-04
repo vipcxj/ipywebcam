@@ -11,7 +11,6 @@ TODO: Add module docstring
 import asyncio
 import inspect
 import logging
-import sys
 import uuid
 from abc import ABCMeta, abstractmethod
 from contextlib import contextmanager, nullcontext
@@ -19,7 +18,7 @@ from dataclasses import dataclass, field
 from os import path
 from threading import RLock
 from typing import Any as AnyType
-from typing import Awaitable, Callable, Generic, Optional, TypeVar, Union
+from typing import Awaitable, Callable, Generic, Optional, TypeVar, Union, cast
 
 from aiortc import (RTCConfiguration, RTCIceServer, RTCPeerConnection,
                     RTCSessionDescription)
@@ -30,7 +29,7 @@ from ipywidgets import DOMWidget, Dropdown, Output
 from traitlets import Any, Bool, Dict, Enum, Float, List, Unicode, link
 
 from ._frontend import module_name, module_version
-from .common import OutputContextManager, BaseWidget, ContextHelper
+from .common import BaseWidget, ContextHelper, OutputContextManager
 
 logger = logging.getLogger("ipywebcam")
 logger.setLevel(logging.DEBUG)
@@ -45,7 +44,7 @@ relay = MediaRelay()
 MT = TypeVar('MT', VideoFrame, AudioFrame)
 class MediaTransformer(Generic[MT]):
     enabled: bool = True
-    def __init__(self, callback: Callable[[MT, dict, MediaStreamTrack], Union[MT, Awaitable[MT]]], context: dict | None = None) -> None:
+    def __init__(self, callback: Callable[[MT, dict, MediaStreamTrack], MT | None | Awaitable[MT | None]], context: dict | None = None) -> None:
         self.callback = callback
         self.context = context if context is not None else {}
         self.iscoroutinefunction = inspect.iscoroutinefunction(self.callback)
@@ -53,24 +52,24 @@ class MediaTransformer(Generic[MT]):
         self.require_ctx =  len(sig.parameters) > 1
         self.require_track = len(sig.parameters) > 2
         
-    async def transform(self, frame: MT, track: MediaStreamTrack=None) -> MT | None:
+    async def transform(self, frame: MT, track: MediaStreamTrack) -> MT | None:
         if not self.enabled:
             return frame
         if self.iscoroutinefunction:
             if self.require_ctx and self.require_track:
-                out_frame = await self.callback(frame, self.context, track)
+                out_frame = await self.callback(frame, self.context, track) # type: ignore
             elif self.require_ctx:
-                out_frame = await self.callback(frame, self.context)
+                out_frame = await self.callback(frame, self.context) # type: ignore
             else:
-                out_frame = await self.callback(frame)
+                out_frame = await self.callback(frame) # type: ignore
         else:
             if self.require_ctx and self.require_track:
                 out_frame = self.callback(frame, self.context, track)
             elif self.require_ctx:
-                out_frame = self.callback(frame, self.context)
+                out_frame = self.callback(frame, self.context) # type: ignore
             else:
-                out_frame = self.callback(frame)
-        return out_frame
+                out_frame = self.callback(frame) # type: ignore
+        return cast(MT | None, out_frame)
 
 
 class WithMediaTransformers:
@@ -97,7 +96,7 @@ class MediaTransformTrack(MediaStreamTrack, Generic[MT], metaclass=ABCMeta):
     async def recv(self) -> MT:
         frame: MT = await self.track.recv()
         org_frame = frame
-        output_context_manager = OutputContextManager(self.output) if self.output is not None else nullcontext
+        output_context_manager = OutputContextManager(self.output) if self.output is not None else nullcontext()
         for transformer in self.__class__.get_transformers(self.withTransformers):
             out_frame = None
             transformer.context[ContextHelper.KEY_ORG_FRAME] = org_frame
@@ -191,9 +190,9 @@ class TrackMap:
 class State:
     id: str
     widget: "WebCamWidget"
-    pc: RTCPeerConnection = None
-    client_desc: RTCSessionDescription = None
-    server_desc: RTCSessionDescription = None
+    pc: RTCPeerConnection | None = None
+    client_desc: RTCSessionDescription | None = None
+    server_desc: RTCSessionDescription | None = None
     lock: RLock = field(default_factory=RLock)
     a_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     video_input_devices: list[dict] = field(default_factory=list)
@@ -214,11 +213,11 @@ class State:
         def on_view_count_change(type: str, old_count, new_count):
             self.log_info(f"view count change from {old_count} to {new_count}")
             if old_count == 0 and new_count > 0:
-                self.widget.request_devices(self.id, type=type)
+                self.widget.request_devices(self.id, dev_type=type)
         def transform_change(change: dict) -> dict:
             return {
-                "old": None if change.old is None else change.old["deviceId"],
-                "new": None if change.new is None else change.new["deviceId"],
+                "old": None if change.old is None else change.old["deviceId"], # type: ignore
+                "new": None if change.new is None else change.new["deviceId"], # type: ignore
             }
         def create_handler(type: str) -> Callable[[AnyType], None]:
             def handler(change: AnyType) -> None:
@@ -228,15 +227,15 @@ class State:
                     self.widget.notify_device_change(self.id, type=type, change=t_change)
             return handler
         
-        self.video_input_selector.observe(lambda change: on_view_count_change("video_input", change.old, change.new), "_view_count")
-        self.observe(id, "video_input", create_handler("video_input"))
-        self.audio_input_selector.observe(lambda change: on_view_count_change("audio_input", change.old, change.new), "_view_count")
-        self.observe(id, "audio_input", create_handler("audio_input"))
-        self.audio_output_selector.observe(lambda change: on_view_count_change("audio_output", change.old, change.new), "_view_count")
-        self.observe(id, "audio_output", create_handler("audio_output"))
+        self.video_input_selector.observe(lambda change: on_view_count_change("video_input", change.old, change.new), "_view_count") # type: ignore
+        self.observe(self.id, "video_input", create_handler("video_input"))
+        self.audio_input_selector.observe(lambda change: on_view_count_change("audio_input", change.old, change.new), "_view_count") # type: ignore
+        self.observe(self.id, "audio_input", create_handler("audio_input"))
+        self.audio_output_selector.observe(lambda change: on_view_count_change("audio_output", change.old, change.new), "_view_count") # type: ignore
+        self.observe(self.id, "audio_output", create_handler("audio_output"))
         
     
-    def get_device_id(self, type: str) -> str:
+    def get_device_id(self, type: str) -> str | None:
         if type == 'video_input':
             return self.video_input_device_id
         elif type == 'audio_input':
@@ -260,7 +259,7 @@ class State:
         with self.lock:
             self._set_device_id(type=type, id=id)
             selector = self.get_device_selector(type=type)
-            device = find_device_from_options(selector.options, id)
+            device = find_device_from_options(cast(AnyType, selector.options), id)
             self.log_info(f'found device: {device} from options by id: {id} and type: {type}')
             if selector.value != device:
                 selector.value = device
@@ -325,8 +324,8 @@ class State:
                 selector = self.get_device_selector(type=type)
                 options = transform_devices_to_options(devices=devices)
                 device_id = self.get_device_id(type)
-                old_value = selector.value
-                new_value = None if device_id is None else find_device_from_options(options, device_id)
+                old_value = cast(AnyType, selector.value)
+                new_value = None if device_id is None else find_device_from_options(cast(AnyType, options), device_id)
                 with self.hold_devices(type):
                     selector.options = options
                     selector.value = new_value
@@ -351,7 +350,7 @@ class State:
     def observe(self, id: str, type: str, handler: Callable[[dict], None]):
         with self.lock:
             selector = self.get_device_selector(type=type)
-            selector.observe(handler=handler, names="value")
+            selector.observe(handler=handler, names="value") # type: ignore
             
     def log_info(self, msg: str, *args):
         logger.info(f"[{self.id}] {msg}", *args)
@@ -368,7 +367,7 @@ class State:
                 id = uuid.uuid4().hex
                 pc = self.pc
                 @pc.on("icegatheringstatechange")
-                async def on_iceconnectionstatechange():
+                async def on_icegatheringstatechange():
                     self.log_info(f"[{id}] Ice connection state is {pc.iceGatheringState}")
                 
                 @pc.on("iceconnectionstatechange")
@@ -407,6 +406,7 @@ class State:
                 await pc.setRemoteDescription(offer)
                 # send answer
                 answer = await pc.createAnswer()
+                assert answer is not None
                 await pc.setLocalDescription(answer)
                 self.server_desc = pc.localDescription
                 self.widget.answer("exchange_peer", self.id, { "sdp": self.server_desc.sdp, "type": self.server_desc.type })
@@ -439,29 +439,29 @@ class WebCamWidget(DOMWidget, BaseWidget, WithMediaTransformers):
     """
     output = Output()
     
-    _model_name = Unicode('WebCamModel').tag(sync=True)
-    _view_name = Unicode('WebCamView').tag(sync=True)
+    _model_name = Unicode(cast(AnyType, 'WebCamModel')).tag(sync=True)
+    _view_name = Unicode(cast(AnyType, 'WebCamView')).tag(sync=True)
      
-    iceServers = List(Any(), default_value=[]).tag(sync=True)
+    iceServers = List(Any(), default_value=[]).tag(sync=True) # type: ignore
     
-    autoplay = Bool(True, allow_none=True).tag(sync=True)
+    autoplay = Bool(True, allow_none=True).tag(sync=True) # type: ignore
     
-    controls = Bool(True, allow_none=True).tag(sync=True)
+    controls = Bool(True, allow_none=True).tag(sync=True) # type: ignore
     
-    crossOrigin = Enum(set(['not-support', 'anonymous', 'use-credentials']), default_value='not-support').tag(sync=True)
+    crossOrigin = Enum(set(['not-support', 'anonymous', 'use-credentials']), default_value='not-support').tag(sync=True) # type: ignore
     
-    width = Float(default_value=None, allow_none=True).tag(sync=True)
+    width = Float(default_value=None, allow_none=True).tag(sync=True) # type: ignore
     
-    height = Float(default_value=None, allow_none=True).tag(sync=True)
+    height = Float(default_value=None, allow_none=True).tag(sync=True) # type: ignore
     
-    playsInline = Bool(True, allow_none=True).tag(sync=True)
+    playsInline = Bool(True, allow_none=True).tag(sync=True) # type: ignore
     
-    muted = Bool(False, allow_none=True).tag(sync=True)
+    muted = Bool(False, allow_none=True).tag(sync=True) # type: ignore
     
-    constraints = Dict(default_value=None, allow_none=True).tag(sync=True)
+    constraints = Dict(default_value=None, allow_none=True).tag(sync=True) # type: ignore
     
-    video_codecs = List(Unicode(), default_value=[]).tag(sync=True)
-    video_codec = Unicode(default_value=None, allow_none=True).tag(sync=True)
+    video_codecs = List(Unicode(), default_value=[]).tag(sync=True) # type: ignore
+    video_codec = Unicode(default_value=None, allow_none=True).tag(sync=True) # type: ignore
     video_codec_selector = Dropdown(options=[], value=None, description='Video codec')
     
     state_map: dict[str, State]
@@ -471,7 +471,7 @@ class WebCamWidget(DOMWidget, BaseWidget, WithMediaTransformers):
     def __init__(
         self,
         constraints: Optional[dict] = None,
-        iceServers: Optional[list[RTCIceServer]] = None,
+        iceServers: Optional[list[str | dict[str, AnyType]]] = None,
         autoplay: Optional[bool] = None,
         controls: Optional[bool] = None,
         crossOrigin: Optional[bool] = None,
@@ -524,9 +524,11 @@ class WebCamWidget(DOMWidget, BaseWidget, WithMediaTransformers):
         
     def get_current_state(self, create=True) -> State:
         if create:
-            return self.get_or_create_state(self.model_id)
+            return self.get_or_create_state(cast(AnyType, self.model_id))
         else:
-            return self.state_map.get(self.model_id)
+            st = self.state_map.get(cast(AnyType, self.model_id))
+            assert st is not None
+            return st
     
     @property
     def video_input_selector(self) -> Dropdown:
@@ -552,14 +554,14 @@ class WebCamWidget(DOMWidget, BaseWidget, WithMediaTransformers):
     def audio_output_device_id(self) -> str | None:
         return self.get_current_state().audio_output_device_id
         
-    def request_devices(self, id: str, type: str):
+    def request_devices(self, id: str, dev_type: str):
         state = self.get_or_create_state(id)
         def on_result(id: str, res: AnyType):
             if not isinstance(res, list):
                 raise RuntimeError(f"The result of request_devices command from {id} should be a list. but got {type(res)}")
-            state.set_devices(type=type, devices=res)
+            state.set_devices(type=dev_type, devices=res)
             
-        self.send_command("request_devices", id, { "type": type }, on_result=on_result)
+        self.send_command("request_devices", id, { "type": dev_type }, on_result=on_result)
         
         
     def answer_exchange_peer(self, id: str, cmd: str, args: dict):
@@ -602,7 +604,7 @@ class WebCamWidget(DOMWidget, BaseWidget, WithMediaTransformers):
         """        
         self.video_transformers = [t for t in self.video_transformers if t != transformer]
         
-    def add_video_poster(self, callback: Callable[[VideoFrame, dict, MediaStreamTrack], None]) -> MediaTransformer[VideoFrame]:
+    def add_video_poster(self, callback: Callable[[VideoFrame, dict, MediaStreamTrack], VideoFrame | None | Awaitable[VideoFrame | None]]) -> MediaTransformer[VideoFrame]:
         """Add a video frame post processor
 
         Args:
@@ -653,7 +655,7 @@ class WebCamWidget(DOMWidget, BaseWidget, WithMediaTransformers):
         """        
         self.audio_transformers = [t for t in self.audio_transformers if t != transformer]
         
-    def add_audio_poster(self, callback: Callable[[AudioFrame, dict, MediaStreamTrack], None]) -> MediaTransformer[AudioFrame]:
+    def add_audio_poster(self, callback: Callable[[AudioFrame, dict, MediaStreamTrack], AudioFrame | None | Awaitable[AudioFrame | None]]) -> MediaTransformer[AudioFrame]:
         """Add a audio frame post processor
 
         Args:
@@ -684,6 +686,7 @@ class WebCamWidget(DOMWidget, BaseWidget, WithMediaTransformers):
         with self.lock:
             for state in self.state_map.values():
                 pc = state.pc
+                assert pc is not None
                 tracks: list[MediaStreamTrack] = []
                 for track in state.track_map.video:
                     tracks.append(track)
@@ -701,8 +704,9 @@ class WebCamWidget(DOMWidget, BaseWidget, WithMediaTransformers):
     
     def get_ice_servers(self) -> list[RTCIceServer]:
         servers: list[RTCIceServer] = []
-        if self.iceServers and len(self.iceServers) > 0:
-            for config in self.iceServers:
+        iceServers = cast(list[str | dict[str, AnyType]] | None, self.iceServers)
+        if iceServers is not None and len(iceServers) > 0:
+            for config in iceServers:
                 if isinstance(config, str):
                     servers.append(RTCIceServer(urls=config))
                 else:
