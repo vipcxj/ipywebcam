@@ -6,7 +6,7 @@
 
 import re
 
-__version__ = "0.1.11.dev"
+__version__ = "0.1.12"
 
 def extract_version_info(ver: str) -> tuple:
     res = re.match(r'(?P<major>\d+)\.(?P<minor>\d+)\.(?P<patch>\d+)(?P<channel>a|b|rc|.dev)?', ver)
