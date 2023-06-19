@@ -4,8 +4,9 @@ import os
 from logging import Logger
 from os import path
 import sys
-from typing import Any, Callable, TypeVar, cast
-from _typeshed import SupportsRichComparisonT
+from typing import Any, Callable, TypeVar, cast, TYPE_CHECKING
+if TYPE_CHECKING:
+    from _typeshed import SupportsRichComparisonT
 
 from ipywidgets import Widget, Output
 from traitlets import Unicode
