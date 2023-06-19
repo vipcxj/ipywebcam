@@ -1,14 +1,18 @@
+from __future__ import annotations
+
 import bisect
-from av import AudioFrame, VideoFrame
 import os
+import sys
 from logging import Logger
 from os import path
-import sys
-from typing import Any, Callable, TypeVar, cast, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, Callable, TypeVar, cast
+
+from av import AudioFrame, VideoFrame
+
 if TYPE_CHECKING:
     from _typeshed import SupportsRichComparisonT
 
-from ipywidgets import Widget, Output
+from ipywidgets import Output, Widget
 from traitlets import Unicode
 
 from ._frontend import module_name, module_version
