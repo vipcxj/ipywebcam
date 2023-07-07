@@ -1,5 +1,6 @@
 /* eslint-disable no-undef */
 const path = require('path');
+const webpack = require('webpack');
 const version = require('./package.json').version;
 
 // Custom webpack rules
@@ -20,6 +21,12 @@ const resolve = {
   // Add '.ts' and '.tsx' as resolvable extensions.
   extensions: ['.webpack.js', '.web.js', '.ts', '.js'],
 };
+
+const plugins = [
+  new webpack.ProvidePlugin({
+    io: ['socket.io-client', 'io'],
+  }),
+];
 
 module.exports = [
   /**
@@ -71,6 +78,7 @@ module.exports = [
     externals,
     resolve,
     watchOptions,
+    plugins,
   },
 
   /**
@@ -93,5 +101,6 @@ module.exports = [
     externals,
     resolve,
     watchOptions,
+    plugins,
   },
 ];

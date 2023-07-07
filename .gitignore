@@ -158,3 +158,4 @@ ipywebcam/labextension
 
 *.mp4
 *.record_list
+examples/introduction.ipynb

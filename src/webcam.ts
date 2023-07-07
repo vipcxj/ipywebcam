@@ -14,6 +14,7 @@ import {
   negotiate,
   waitForConnectionState,
 } from './webrtc';
+import * as OWT from './owt';
 import { arrayInclude } from './utils';
 
 // Import the CSS
@@ -61,6 +62,7 @@ export class WebCamModel extends BaseModel<WebCamMsgTypeMap> {
       _view_name: WebCamModel.view_name,
       server_desc: null,
       client_desc: null,
+      owtToken: null,
       iceServers: [],
       constraints: null,
       video_codecs: [],
@@ -91,6 +93,7 @@ export class WebCamModel extends BaseModel<WebCamMsgTypeMap> {
     //   console.log(args);
     //   this.connect(undefined, true, true);
     // });
+    this.on('change:owtToken', () => {});
     this.on('change:iceServers', () => {
       this.connect(undefined, true, true);
     });
@@ -146,6 +149,8 @@ export class WebCamModel extends BaseModel<WebCamMsgTypeMap> {
   pc: RTCPeerConnection | undefined;
   client_stream: MediaStream | undefined;
   server_stream: MediaStream | undefined;
+  conference: OWT.Conference.ConferenceClient | undefined;
+  conferenceInfo: OWT.Conference.ConferenceInfo | undefined;
 
   resetPeer = (): void => {
     this.pc = undefined;
@@ -324,51 +329,82 @@ export class WebCamModel extends BaseModel<WebCamMsgTypeMap> {
       }
       try {
         this.setState('connecting');
-        const pc = createPeerConnection(this.getPeerConfig());
-        this.pc = pc;
-        this.bindVideo(video);
-        pc.addEventListener('connectionstatechange', () => {
-          const state = pc.connectionState;
-          if (
-            state === 'failed' ||
-            state === 'disconnected' ||
-            state === 'closed'
-          ) {
-            pc.close();
-            if (this.pc === pc) {
-              this.resetPeer();
-            }
-          }
-        });
-        pc.addEventListener('track', (evt) => {
-          if (evt.track.kind === 'video') {
-            console.log('track gotten');
-            this.server_stream = evt.streams[0];
-          }
-        });
-        const stream = await navigator.mediaDevices.getUserMedia(
-          this.getConstraints()
-        );
-        this.client_stream = stream;
-        stream.getTracks().forEach((track) => {
-          this.syncDevice(track);
-          pc.addTrack(track, stream);
-        });
-        await negotiate(pc, async (offer) => {
-          console.log(offer);
-          const { content } = await this.send_cmd('exchange_peer', {
-            desc: offer,
-          });
-          return content;
-        });
-        const pcState = await waitForConnectionState(
-          pc,
-          (state) => state !== 'connecting' && state !== 'new'
-        );
-        if (pcState === 'connected') {
+        const owtToken = this.get('owtToken');
+        if (owtToken) {
+          this.conference = new OWT.Conference.ConferenceClient();
+          this.conferenceInfo = await this.conference.join(owtToken);
+          const stream = await navigator.mediaDevices.getUserMedia(
+            this.getConstraints()
+          );
+          const localStream = new OWT.Base.LocalStream(
+            stream,
+            new OWT.Base.StreamSourceInfo(
+              OWT.Base.AudioSourceInfo.MIC,
+              OWT.Base.VideoSourceInfo.CAMERA,
+              false
+            ),
+            {}
+          );
+          const publishOption: OWT.Base.PublishOptions = {
+            video: [
+              { rid: 'q', active: true, scaleResolutionDownBy: 4.0 },
+              { rid: 'h', active: true, scaleResolutionDownBy: 2.0 },
+              { rid: 'f', active: true, scaleResolutionDownBy: 1.0 },
+            ],
+          };
+          await this.conference.publish(localStream, publishOption, [
+            'vp8',
+            'vp9',
+            'h264',
+          ]);
           this.setState('connected');
         } else {
-          await this.closePeer();
+          const pc = createPeerConnection(this.getPeerConfig());
+          this.pc = pc;
+          this.bindVideo(video);
+          pc.addEventListener('connectionstatechange', () => {
+            const state = pc.connectionState;
+            if (
+              state === 'failed' ||
+              state === 'disconnected' ||
+              state === 'closed'
+            ) {
+              pc.close();
+              if (this.pc === pc) {
+                this.resetPeer();
+              }
+            }
+          });
+          pc.addEventListener('track', (evt) => {
+            if (evt.track.kind === 'video') {
+              console.log('track gotten');
+              this.server_stream = evt.streams[0];
+            }
+          });
+          const stream = await navigator.mediaDevices.getUserMedia(
+            this.getConstraints()
+          );
+          this.client_stream = stream;
+          stream.getTracks().forEach((track) => {
+            this.syncDevice(track);
+            pc.addTrack(track, stream);
+          });
+          await negotiate(pc, async (offer) => {
+            console.log(offer);
+            const { content } = await this.send_cmd('exchange_peer', {
+              desc: offer,
+            });
+            return content;
+          });
+          const pcState = await waitForConnectionState(
+            pc,
+            (state) => state !== 'connecting' && state !== 'new'
+          );
+          if (pcState === 'connected') {
+            this.setState('connected');
+          } else {
+            await this.closePeer();
+          }
         }
       } catch (err) {
         this.setState('error');
@@ -384,7 +420,8 @@ export class WebCamModel extends BaseModel<WebCamMsgTypeMap> {
 
   bindVideo = (video: HTMLVideoElement | undefined): void => {
     const pc = this.pc;
-    if (!pc || !video) {
+    const conference = this.conference;
+    if (!pc || !video || !conference) {
       return;
     }
     if (pc.connectionState === 'connected' && this.server_stream) {

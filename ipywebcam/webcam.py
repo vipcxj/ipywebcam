@@ -441,6 +441,8 @@ class WebCamWidget(DOMWidget, BaseWidget, WithMediaTransformers):
     
     _model_name = Unicode(cast(AnyType, 'WebCamModel')).tag(sync=True)
     _view_name = Unicode(cast(AnyType, 'WebCamView')).tag(sync=True)
+    
+    owtToken = Unicode(default_value=None, allow_none=True).tag(sync=True) # type: ignore
      
     iceServers = List(Any(), default_value=[]).tag(sync=True) # type: ignore
     

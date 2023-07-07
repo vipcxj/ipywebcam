@@ -1,5 +1,6 @@
 {
   "compilerOptions": {
+    "allowJs": true,
     "experimentalDecorators": true,
     "declaration": true,
     "esModuleInterop":true,
@@ -19,6 +20,7 @@
     "types": ["jest"]
   },
   "include": [
+    "src/**/*.js",
     "src/**/*.ts",
     "src/**/*.tsx",
   ],
